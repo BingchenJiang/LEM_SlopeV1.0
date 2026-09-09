@@ -1,10 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-PyQt5 桌面端主窗口：集成菜单栏、控制面板、交互画布、搜索调度与结果面板
+PyQt5 桌面端主窗口：集成标准菜单栏、CAD 地表线导入导出、异步后台寻优与结果报表
 """
+import os
+import csv
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QSplitter,
-    QMessageBox, QStatusBar, QApplication, QPushButton
+    QMessageBox, QStatusBar, QFileDialog, QAction, QPushButton
 )
 from PyQt5.QtCore import Qt
 
@@ -14,10 +16,9 @@ from core.solvers import (
     FelleniusSolver, BishopSolver, JanbuSolver,
     SpencerSolver, MorgensternPriceSolver
 )
-from core.search import (
-    PSOSearcher, SimulatedAnnealingSearcher,
-    DifferentialEvolutionSearcher, NelderMeadSearcher, GridSearcher
-)
+from core.dxf_io import export_ground_dxf, import_dxf_polyline
+from core.project_io import save_project_file, load_project_file
+from core.threads import OptimizationWorker
 from gui.dock_params import ParamsDockWidget
 from gui.dock_results import ResultsDockWidget
 from gui.canvas_qt import SlopeGraphicsView
@@ -27,50 +28,134 @@ class MainWindow(QMainWindow):
     """边坡极限平衡分析系统主窗口"""
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("边坡极限平衡法稳定性分析平台 (LEM-Slope-Studio) — 经典模型与智能寻优")
-        self.resize(1320, 860)
+        self.setWindowTitle("边坡极限平衡法稳定性分析平台 (LEM-Slope-Studio)")
+        self.resize(1350, 880)
 
         self.current_slices = None
         self.slice_info = None
         self.current_geom = None
         self.searched_best_params = None
-        self._initial_fit_done = False  # 首次呈现标记
+        self.current_project_file = None
+        self._initial_fit_done = False
+        self._search_worker = None
 
+        self._init_menu_bar()
         self._init_ui()
         self.on_params_changed()
+
+    def _init_menu_bar(self):
+        """初始化标准菜单栏"""
+        menu_bar = self.menuBar()
+
+        # 文件菜单
+        file_menu = menu_bar.addMenu("文件(&F)")
+
+        act_new = QAction("新建工程(&N)", self)
+        act_new.setShortcut("Ctrl+N")
+        act_new.triggered.connect(self.on_menu_new)
+        file_menu.addAction(act_new)
+
+        act_open = QAction("打开工程(&O)...", self)
+        act_open.setShortcut("Ctrl+O")
+        act_open.triggered.connect(self.on_menu_open)
+        file_menu.addAction(act_open)
+
+        act_save = QAction("保存工程(&S)", self)
+        act_save.setShortcut("Ctrl+S")
+        act_save.triggered.connect(self.on_menu_save)
+        file_menu.addAction(act_save)
+
+        act_save_as = QAction("工程另存为(&A)...", self)
+        act_save_as.setShortcut("Ctrl+Shift+S")
+        act_save_as.triggered.connect(self.on_menu_save_as)
+        file_menu.addAction(act_save_as)
+
+        file_menu.addSeparator()
+
+        act_import_dxf = QAction("导入 CAD 地表线 (DXF)...", self)
+        act_import_dxf.triggered.connect(self.on_menu_import_dxf)
+        file_menu.addAction(act_import_dxf)
+
+        act_export_dxf = QAction("导出地表线至 CAD (DXF)...", self)
+        act_export_dxf.triggered.connect(self.on_menu_export_dxf)
+        file_menu.addAction(act_export_dxf)
+
+        act_export_csv = QAction("导出切片计算报表 (CSV)...", self)
+        act_export_csv.triggered.connect(self.on_menu_export_csv)
+        file_menu.addAction(act_export_csv)
+
+        file_menu.addSeparator()
+
+        act_exit = QAction("退出(&X)", self)
+        act_exit.setShortcut("Ctrl+Q")
+        act_exit.triggered.connect(self.close)
+        file_menu.addAction(act_exit)
+
+        # 几何与视图菜单
+        view_menu = menu_bar.addMenu("几何与视图(&V)")
+
+        act_zoom_fit = QAction("全屏居中复位 (Zoom Extents)", self)
+        act_zoom_fit.setShortcut("F5")
+        act_zoom_fit.triggered.connect(lambda: self.canvas.fit_view_to_slope(margin_ratio=0.15))
+        view_menu.addAction(act_zoom_fit)
+
+        # 分析计算菜单
+        calc_menu = menu_bar.addMenu("分析计算(&A)")
+
+        act_run_all = QAction("运行全部经典模型求解", self)
+        act_run_all.setShortcut("F6")
+        act_run_all.triggered.connect(self.on_calculate_requested)
+        calc_menu.addAction(act_run_all)
+
+        act_start_search = QAction("启动最危险滑面搜索", self)
+        act_start_search.triggered.connect(self.on_search_requested)
+        calc_menu.addAction(act_start_search)
+
+        act_stop_search = QAction("终止当前搜索", self)
+        act_stop_search.triggered.connect(self.on_search_stop_requested)
+        calc_menu.addAction(act_stop_search)
+
+        # 帮助菜单
+        help_menu = menu_bar.addMenu("帮助(&H)")
+
+        act_theory = QAction("极限平衡理论说明...", self)
+        act_theory.triggered.connect(self.on_menu_theory_help)
+        help_menu.addAction(act_theory)
+
+        act_about = QAction("关于 LEM-Slope-Studio...", self)
+        act_about.triggered.connect(self.on_menu_about)
+        help_menu.addAction(act_about)
 
     def _init_ui(self):
         main_widget = QWidget()
         main_layout = QHBoxLayout(main_widget)
         h_splitter = QSplitter(Qt.Horizontal)
 
-        # 1. 左侧参数配置面板
+        # 左侧控制面板
         self.dock_params = ParamsDockWidget(self)
         self.dock_params.params_changed.connect(self.on_params_changed)
         self.dock_params.calculate_requested.connect(self.on_calculate_requested)
         self.dock_params.search_requested.connect(self.on_search_requested)
+        self.dock_params.search_stop_requested.connect(self.on_search_stop_requested)
         self.dock_params.apply_searched_circle.connect(self.on_apply_searched_circle)
         h_splitter.addWidget(self.dock_params)
 
-        # 2. 右侧垂直分割：上方绘图视口，下方计算结果表格
+        # 右侧绘图视口与结果表格
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        # 视口辅助操作栏（CAD 级快速居中复位按钮）
         view_tools = QHBoxLayout()
-        btn_zoom_fit = QPushButton("全屏居中 (Zoom Extents)")
-        btn_zoom_fit.setToolTip("按比例自动将边坡居中铺满视口 (双击鼠标中键亦可)")
+        btn_zoom_fit = QPushButton("全屏居中复位 (Zoom Extents)")
+        btn_zoom_fit.setToolTip("按比例将边坡居中铺满视口 (双击鼠标中键亦可)")
         btn_zoom_fit.setStyleSheet("padding: 4px 10px; font-weight: bold;")
         btn_zoom_fit.clicked.connect(lambda: self.canvas.fit_view_to_slope(margin_ratio=0.15))
         view_tools.addWidget(btn_zoom_fit)
         view_tools.addStretch()
         right_layout.addLayout(view_tools)
 
-        # 原生 QGraphicsView CAD 级视口
         self.canvas = SlopeGraphicsView(self)
         right_layout.addWidget(self.canvas, stretch=3)
 
-        # 结果与条块明细面板
         self.dock_results = ResultsDockWidget(self)
         right_layout.addWidget(self.dock_results, stretch=2)
 
@@ -83,24 +168,24 @@ class MainWindow(QMainWindow):
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
-        self.status_bar.showMessage("系统就绪，已载入标准基准边坡算例与智能寻优算法引擎。")
+        self.status_bar.showMessage("系统就绪，已载入标准基准边坡算例。")
 
     def showEvent(self, event):
-        """窗口首次呈现在屏幕上时，视口具有了真实像素尺寸，自动触发一次全局自适应居中"""
+        """窗口首次呈现时触发自动居中自适应"""
         super().showEvent(event)
         if not self._initial_fit_done:
             self._initial_fit_done = True
             self.canvas.fit_view_to_slope(margin_ratio=0.15)
 
     def on_params_changed(self):
-        """响应参数修改，重新切片并实时重绘边坡"""
+        """响应参数变动并重绘"""
         ground_x, ground_y, ground_pts = self.dock_params.get_geometry_data()
         if len(ground_pts) < 2:
             return
 
         water_table_pts = [(x, y - 3.0 if y > 3.0 else 0.0) for x, y in ground_pts]
         self.current_geom = SlopeGeometry(ground_pts, water_table_pts)
-        
+
         material = self.dock_params.get_material()
         xc, yc, R, n_slices = self.dock_params.get_circle_params()
         ru, use_water_table = self.dock_params.get_water_condition()
@@ -116,10 +201,10 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(msg)
 
     def on_calculate_requested(self):
-        """执行所有经典土力学极限平衡求解器"""
+        """执行 5 种经典 LEM 求解"""
         self.on_params_changed()
         if not self.current_slices or not self.slice_info:
-            QMessageBox.warning(self, "几何异常", "当前滑弧未能在边坡土体内部形成有效滑动面，请调整圆心或半径！")
+            QMessageBox.warning(self, "几何异常", "当前滑弧未能在边坡土体内部形成有效滑动面，请调整圆心或半径。")
             return
 
         xc, yc, R, _ = self.dock_params.get_circle_params()
@@ -139,42 +224,55 @@ class MainWindow(QMainWindow):
             results.append((name, (fs, note)))
 
         self.dock_results.display_summary(results)
-        self.status_bar.showMessage("全部经典极限平衡模型分析完成！")
+        self.status_bar.showMessage("全部经典极限平衡模型分析完成。")
 
     def on_search_requested(self):
-        """执行临界最危险滑面自动寻优"""
+        """启动后台独立线程执行全局临界滑面寻优"""
         ground_x, ground_y, ground_pts = self.dock_params.get_geometry_data()
         if len(ground_pts) < 2:
             return
-        
+
         water_table_pts = [(x, y - 3.0 if y > 3.0 else 0.0) for x, y in ground_pts]
         self.current_geom = SlopeGeometry(ground_pts, water_table_pts)
         material = self.dock_params.get_material()
         ru, use_water_table = self.dock_params.get_water_condition()
 
         algo_name, eval_name, bounds = self.dock_params.get_search_config()
-        self.status_bar.showMessage(f"正在采用 [{algo_name}] 智能搜索临界最危险滑面...")
+        self.status_bar.showMessage(f"正在后台启动 [{algo_name}] 智能搜索临界滑面...")
+
+        self.dock_params.btn_search.setEnabled(False)
+        self.dock_params.btn_stop_search.setEnabled(True)
         self.dock_params.prog_bar.setValue(0)
 
-        # 根据算法选择实例化求解器
-        if "PSO" in algo_name:
-            searcher = PSOSearcher(self.current_geom, material, bounds, eval_method=eval_name, ru=ru, use_water_table=use_water_table, n_particles=25, max_iter=30)
-        elif "退火" in algo_name:
-            searcher = SimulatedAnnealingSearcher(self.current_geom, material, bounds, eval_method=eval_name, ru=ru, use_water_table=use_water_table)
-        elif "差分进化" in algo_name:
-            searcher = DifferentialEvolutionSearcher(self.current_geom, material, bounds, eval_method=eval_name, ru=ru, use_water_table=use_water_table, popsize=10, maxiter=20)
-        elif "单纯形" in algo_name:
-            searcher = NelderMeadSearcher(self.current_geom, material, bounds, eval_method=eval_name, ru=ru, use_water_table=use_water_table)
-        else:
-            searcher = GridSearcher(self.current_geom, material, bounds, eval_method=eval_name, ru=ru, use_water_table=use_water_table, nx=10, ny=10, nr=8)
+        self._search_worker = OptimizationWorker(
+            algo_name=algo_name,
+            eval_name=eval_name,
+            geom=self.current_geom,
+            material=material,
+            bounds=bounds,
+            ru=ru,
+            use_water_table=use_water_table,
+            parent=self
+        )
+        self._search_worker.progress_updated.connect(self._on_search_progress)
+        self._search_worker.search_finished.connect(self._on_search_finished)
+        self._search_worker.search_failed.connect(self._on_search_failed)
+        self._search_worker.start()
 
-        def progress_cb(current, total, current_best):
-            pct = int(current / max(1, total) * 100)
-            self.dock_params.prog_bar.setValue(min(100, pct))
-            self.dock_params.lbl_best_fs.setText(f"{current_best:.4f} (搜索中...)")
-            QApplication.processEvents()
+    def on_search_stop_requested(self):
+        """中断正在运行的后台寻优"""
+        if self._search_worker and self._search_worker.isRunning():
+            self._search_worker.stop()
+            self.status_bar.showMessage("正在终止后台寻优任务...")
 
-        best_fs, best_params, info_msg = searcher.search(progress_callback=progress_cb)
+    def _on_search_progress(self, current: int, total: int, current_best: float):
+        pct = int(current / max(1, total) * 100)
+        self.dock_params.prog_bar.setValue(min(100, pct))
+        self.dock_params.lbl_best_fs.setText(f"{current_best:.4f} (搜索中...)")
+
+    def _on_search_finished(self, best_fs: float, best_params: list, info_msg: str):
+        self.dock_params.btn_search.setEnabled(True)
+        self.dock_params.btn_stop_search.setEnabled(False)
         self.dock_params.prog_bar.setValue(100)
         self.searched_best_params = best_params
 
@@ -183,14 +281,148 @@ class MainWindow(QMainWindow):
         self.dock_params.lbl_best_fs.setText(f"{best_fs:.4f}")
         self.status_bar.showMessage(f"寻优完成: {info_msg}，最小安全系数 Fs = {best_fs:.4f}")
 
+    def _on_search_failed(self, err_msg: str):
+        self.dock_params.btn_search.setEnabled(True)
+        self.dock_params.btn_stop_search.setEnabled(False)
+        self.status_bar.showMessage(err_msg)
+        QMessageBox.information(self, "搜索提示", err_msg)
+
     def on_apply_searched_circle(self):
-        """将寻优得到的临界滑弧应用至主模型并触发 5 种 LEM 求解"""
+        """将寻优得到的临界滑弧应用至主模型并触发求解"""
         if self.searched_best_params is None:
-            QMessageBox.information(self, "提示", "请先点击启动搜索获得最危险滑面！")
+            QMessageBox.information(self, "提示", "请先启动搜索获得最危险滑面。")
             return
 
         bx, by, br = self.searched_best_params[0], self.searched_best_params[1], self.searched_best_params[2]
         self.dock_params.set_circle_params(bx, by, br)
         self.on_params_changed()
         self.on_calculate_requested()
-        QMessageBox.information(self, "应用成功", f"已成功载入最危险滑面：\nXc={bx:.2f} m, Yc={by:.2f} m, R={br:.2f} m\n已自动完成 5 种经典 LEM 模型复核！")
+        QMessageBox.information(self, "应用成功", f"已成功载入最危险滑面：\nXc={bx:.2f} m, Yc={by:.2f} m, R={br:.2f} m\n已自动完成 5 种经典 LEM 模型复核。")
+
+    # ================= 菜单栏文件操作 =================
+    def on_menu_new(self):
+        """新建工程恢复基准坡形"""
+        default_pts = [(0.0, 15.0), (20.0, 15.0), (35.0, 0.0), (60.0, 0.0)]
+        self.dock_params.set_geometry_data(default_pts)
+        self.dock_params.set_material(20.0, 15.0, 20.0)
+        self.dock_params.set_circle_params(25.0, 22.0, 23.0)
+        self.current_project_file = None
+        self.on_params_changed()
+        self.canvas.fit_view_to_slope()
+        self.status_bar.showMessage("已新建工程并恢复默认算例参数。")
+
+    def on_menu_open(self):
+        """打开工程文件"""
+        fpath, _ = QFileDialog.getOpenFileName(self, "打开工程文件", "", "LEM 工程文件 (*.lem *.json);;所有文件 (*.*)")
+        if not fpath:
+            return
+        data = load_project_file(fpath)
+        if data:
+            self.dock_params.from_dict(data)
+            self.current_project_file = fpath
+            self.on_params_changed()
+            self.canvas.fit_view_to_slope()
+            self.status_bar.showMessage(f"已成功载入工程: {os.path.basename(fpath)}")
+        else:
+            QMessageBox.critical(self, "打开失败", "工程文件损坏或格式不正确。")
+
+    def on_menu_save(self):
+        """保存工程"""
+        if self.current_project_file:
+            data = self.dock_params.to_dict()
+            if save_project_file(self.current_project_file, data):
+                self.status_bar.showMessage(f"工程已保存: {os.path.basename(self.current_project_file)}")
+            else:
+                QMessageBox.critical(self, "保存失败", "写入文件发生错误。")
+        else:
+            self.on_menu_save_as()
+
+    def on_menu_save_as(self):
+        """工程另存为"""
+        fpath, _ = QFileDialog.getSaveFileName(self, "工程另存为", "slope_case.lem", "LEM 工程文件 (*.lem *.json);;所有文件 (*.*)")
+        if not fpath:
+            return
+        data = self.dock_params.to_dict()
+        if save_project_file(fpath, data):
+            self.current_project_file = fpath
+            self.status_bar.showMessage(f"工程已另存为: {os.path.basename(fpath)}")
+        else:
+            QMessageBox.critical(self, "保存失败", "写入文件发生错误。")
+
+    def on_menu_import_dxf(self):
+        """导入 CAD DXF 地表折线"""
+        fpath, _ = QFileDialog.getOpenFileName(self, "导入 CAD DXF 地表线", "", "AutoCAD DXF 文件 (*.dxf);;所有文件 (*.*)")
+        if not fpath:
+            return
+        pts = import_dxf_polyline(fpath)
+        if len(pts) >= 2:
+            self.dock_params.set_geometry_data(pts)
+            self.on_params_changed()
+            self.canvas.fit_view_to_slope()
+            self.status_bar.showMessage(f"成功从 DXF 导入 {len(pts)} 个地表顶点坐标。")
+            QMessageBox.information(self, "导入成功", f"已从 DXF 提取并载入 {len(pts)} 个连续地表坐标点。")
+        else:
+            QMessageBox.warning(self, "导入失败", "未在 DXF 文件中找到有效的连续折线或线段实体。")
+
+    def on_menu_export_dxf(self):
+        """仅导出地表线至 CAD DXF"""
+        fpath, _ = QFileDialog.getSaveFileName(self, "导出地表线至 CAD DXF", "ground_profile.dxf", "AutoCAD DXF 文件 (*.dxf);;所有文件 (*.*)")
+        if not fpath:
+            return
+
+        _, _, ground_pts = self.dock_params.get_geometry_data()
+        ok = export_ground_dxf(fpath, ground_pts, layer_name="SLOPE_GROUND")
+        if ok:
+            self.status_bar.showMessage(f"地表线已成功导出为 DXF: {os.path.basename(fpath)}")
+            QMessageBox.information(self, "导出成功", f"标准 AutoCAD R12 格式 DXF 文件导出完成：\n{fpath}\n可在 AutoCAD 2022 及其他版本中直接打开。")
+        else:
+            QMessageBox.critical(self, "导出失败", "DXF 文件写出发生错误。")
+
+    def on_menu_export_csv(self):
+        """导出切片物理量详细数据为 CSV 报表"""
+        if not self.current_slices:
+            QMessageBox.warning(self, "提示", "当前无有效切片数据可导出，请先配置有效几何与滑面。")
+            return
+
+        fpath, _ = QFileDialog.getSaveFileName(self, "导出切片数据报表", "slope_slices_report.csv", "CSV 逗号分隔文件 (*.csv);;所有文件 (*.*)")
+        if not fpath:
+            return
+
+        try:
+            import numpy as np
+            with open(fpath, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(["土条编号", "中点X坐标(m)", "条宽b(m)", "高度h(m)", "自重W(kN)", "底坡倾角alpha(度)", "孔隙水压u(kPa)", "底弧长l(m)"])
+                for s in self.current_slices:
+                    writer.writerow([
+                        s.index, round(s.xm, 3), round(s.b, 3), round(s.h, 3),
+                        round(s.W, 3), round(float(np.degrees(s.alpha)), 3),
+                        round(s.u, 3), round(s.l, 3)
+                    ])
+            self.status_bar.showMessage(f"切片数据报表已导出: {os.path.basename(fpath)}")
+            QMessageBox.information(self, "导出成功", f"已成功将 {len(self.current_slices)} 个土条的微元受力数据导出至 CSV 报表。")
+        except Exception as e:
+            QMessageBox.critical(self, "导出失败", f"写入 CSV 报表时出错: {str(e)}")
+
+    def on_menu_theory_help(self):
+        """极限平衡理论说明对话框"""
+        text = (
+            "<h3>极限平衡法 (LEM) 理论模型体系说明</h3>"
+            "<p>本软件实现了土力学经典的 5 大极限平衡计算模型：</p>"
+            "<ul>"
+            "<li><b>Fellenius (瑞典条分法)</b>：忽略条间力，仅考虑整体力矩平衡，适用于均质黏性土初筛。</li>"
+            "<li><b>Simplified Bishop (简化毕肖普法)</b>：考虑水平条间力，严格满足竖向力平衡与整体力矩平衡，求解圆弧滑面精度极高。</li>"
+            "<li><b>Simplified Janbu (简化让布法)</b>：满足条块竖向与水平推力平衡，通过滑弧切深比 d/L 引入 f0 经验修正。</li>"
+            "<li><b>Spencer (斯宾塞法)</b>：完全平衡严密法，假定条间剪力与法向力倾角为常数 θ，联立求解力与力矩平衡。</li>"
+            "<li><b>Morgenstern-Price (M-P 法 / GLE)</b>：广义极限平衡严密法，条间剪力假定为 X = λ·f(x)·E（采用半正弦波函数），满足全部静力平衡。</li>"
+            "</ul>"
+        )
+        QMessageBox.about(self, "理论说明", text)
+
+    def on_menu_about(self):
+        """关于对话框"""
+        text = (
+            "<h3>边坡极限平衡法稳定性分析平台 (LEM-Slope-Studio)</h3>"
+            "<p>基于 Python 3 与 PyQt5 架构开发，内置经典极限平衡条分模型与高等全局智能寻优算法。</p>"
+            "<p>支持 AutoCAD DXF 地表线导入导出与矢量 CAD 图元交互。</p>"
+        )
