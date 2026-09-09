@@ -1,23 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-安全系数对比汇总与条块受力物理量呈现面板
+安全系数对比汇总与条块受力物理量呈现面板 (PyQt5)
 """
 from typing import List, Tuple, Optional
 import numpy as np
-
-try:
-    from PyQt5.QtWidgets import (
-        QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
-        QHeaderView, QTabWidget
-    )
-    from PyQt5.QtCore import Qt
-except ImportError:
-    from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
-        QHeaderView, QTabWidget
-    )
-    from PyQt6.QtCore import Qt
-
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
+    QHeaderView, QTabWidget
+)
+from PyQt5.QtCore import Qt
 from core.slicing import Slice
 
 
@@ -33,17 +24,18 @@ class ResultsDockWidget(QWidget):
         # Tab 1: 汇总对比表
         self.tbl_summary = QTableWidget(5, 3)
         self.tbl_summary.setHorizontalHeaderLabels(["极限平衡求解方法", "稳定安全系数 (Fs)", "力学平衡条件与收敛状态"])
-        header_mode = QHeaderView.ResizeMode.Stretch if hasattr(QHeaderView, 'ResizeMode') else QHeaderView.Stretch
-        self.tbl_summary.horizontalHeader().setSectionResizeMode(header_mode)
+        self.tbl_summary.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.tabs.addTab(self.tbl_summary, "经典 LEM 模型结果对比")
 
         # Tab 2: 土条微元受力明细表
-        self.tbl_slices = QTableWidget(0, 8)
+        self.tbl_slices = QTableWidget(0, 15)
         self.tbl_slices.setHorizontalHeaderLabels([
-            "条块号", "中点 X (m)", "条宽 b (m)", "高度 h (m)", "自重 W (kN)", "底坡角 α (°)", "孔压 u (kPa)", "底斜长 l (m)"
+            "条号", "所属土层", "中点X(m)", "条宽b(m)", "高度h(m)",
+            "土自重(kN)", "外载荷(kN)", "总竖力W(kN)", "地震力Fh(kN)",
+            "孔压u(kPa)", "基质吸力(kPa)", "总黏聚力(kPa)", "摩擦角(°)", "底坡角α(°)", "底斜长l(m)"
         ])
-        self.tbl_slices.horizontalHeader().setSectionResizeMode(header_mode)
-        self.tabs.addTab(self.tbl_slices, "离散土条切片物理量明细")
+        self.tbl_slices.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.tabs.addTab(self.tbl_slices, "离散土条微元多物理量明细")
 
         layout.addWidget(self.tabs)
 
@@ -53,8 +45,7 @@ class ResultsDockWidget(QWidget):
             self.tbl_summary.setItem(r, 0, QTableWidgetItem(method_name))
             fs_text = f"{fs:.4f}" if fs is not None else "未收敛"
             item_fs = QTableWidgetItem(fs_text)
-            align_center = Qt.AlignmentFlag.AlignCenter if hasattr(Qt, 'AlignmentFlag') else Qt.AlignCenter
-            item_fs.setTextAlignment(align_center)
+            item_fs.setTextAlignment(Qt.AlignCenter)
             self.tbl_summary.setItem(r, 1, item_fs)
             self.tbl_summary.setItem(r, 2, QTableWidgetItem(note))
 
@@ -66,10 +57,17 @@ class ResultsDockWidget(QWidget):
         self.tbl_slices.setRowCount(len(slices))
         for r, s in enumerate(slices):
             self.tbl_slices.setItem(r, 0, QTableWidgetItem(str(s.index)))
-            self.tbl_slices.setItem(r, 1, QTableWidgetItem(f"{s.xm:.2f}"))
-            self.tbl_slices.setItem(r, 2, QTableWidgetItem(f"{s.b:.2f}"))
-            self.tbl_slices.setItem(r, 3, QTableWidgetItem(f"{s.h:.2f}"))
-            self.tbl_slices.setItem(r, 4, QTableWidgetItem(f"{s.W:.2f}"))
-            self.tbl_slices.setItem(r, 5, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
-            self.tbl_slices.setItem(r, 6, QTableWidgetItem(f"{s.u:.2f}"))
-            self.tbl_slices.setItem(r, 7, QTableWidgetItem(f"{s.l:.2f}"))
+            self.tbl_slices.setItem(r, 1, QTableWidgetItem(str(s.layer_name)))
+            self.tbl_slices.setItem(r, 2, QTableWidgetItem(f"{s.xm:.2f}"))
+            self.tbl_slices.setItem(r, 3, QTableWidgetItem(f"{s.b:.2f}"))
+            self.tbl_slices.setItem(r, 4, QTableWidgetItem(f"{s.h:.2f}"))
+            self.tbl_slices.setItem(r, 5, QTableWidgetItem(f"{s.W_soil:.2f}"))
+            self.tbl_slices.setItem(r, 6, QTableWidgetItem(f"{s.q_load:.2f}"))
+            self.tbl_slices.setItem(r, 7, QTableWidgetItem(f"{s.W:.2f}"))
+            self.tbl_slices.setItem(r, 8, QTableWidgetItem(f"{s.Fh:.2f}"))
+            self.tbl_slices.setItem(r, 9, QTableWidgetItem(f"{s.u:.2f}"))
+            self.tbl_slices.setItem(r, 10, QTableWidgetItem(f"{s.suction:.2f}"))
+            self.tbl_slices.setItem(r, 11, QTableWidgetItem(f"{s.c:.2f}"))
+            self.tbl_slices.setItem(r, 12, QTableWidgetItem(f"{np.degrees(s.phi):.1f}"))
+            self.tbl_slices.setItem(r, 13, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
+            self.tbl_slices.setItem(r, 14, QTableWidgetItem(f"{s.l:.2f}"))

@@ -17,35 +17,38 @@ class BaseSlipSearcher(ABC):
     def __init__(
         self,
         geom: SlopeGeometry,
-        material: SoilMaterial,
-        bounds: List[Tuple[float, float]],  # [(xmin, xmax), (ymin, ymax), (Rmin, Rmax)]
-        eval_method: str = "Bishop",        # 寻优评估采用的条分法 (Bishop 或 Fellenius)
-        ru: float = 0.0,
-        use_water_table: bool = False,
+        materials: List[SoilMaterial],       # 注意此处改为复数 materials
+        bounds: List[Tuple[float, float]],
+        eval_method: str = "Bishop",
+        rainfall_depth: float = 0.0,         # 接收降雨入渗深度
+        kh: float = 0.0,                     # 接收地震力系数
         n_slices: int = 25
     ):
         self.geom = geom
-        self.material = material
+        self.materials = materials
         self.bounds = bounds
         self.eval_method = eval_method
-        self.ru = ru
-        self.use_water_table = use_water_table
+        self.rainfall_depth = rainfall_depth
+        self.kh = kh
         self.n_slices = n_slices
         self.lb = np.array([b[0] for b in bounds], dtype=float)
         self.ub = np.array([b[1] for b in bounds], dtype=float)
 
     def evaluate(self, params: np.ndarray) -> float:
-        """
-        目标函数评估：计算指定 (xc, yc, R) 下的安全系数 Fs
-        若未切入土体或不收敛，返回高额惩罚值 999.0
-        """
+        """评估目标函数：计算指定 (xc, yc, R) 下的安全系数 Fs"""
         xc, yc, R = float(params[0]), float(params[1]), float(params[2])
         if R <= 0.1:
             return 999.0
 
         slices, info, _ = create_slices(
-            self.geom, self.material, xc, yc, R,
-            n_slices=self.n_slices, ru=self.ru, use_water_table=self.use_water_table
+            self.geom,
+            self.materials,
+            xc,
+            yc,
+            R,
+            n_slices=self.n_slices,
+            rainfall_depth=self.rainfall_depth,
+            kh=self.kh
         )
         if not slices or not info:
             return 999.0
@@ -63,8 +66,4 @@ class BaseSlipSearcher(ABC):
 
     @abstractmethod
     def search(self, progress_callback: Optional[Callable[[int, int, float], None]] = None) -> Tuple[float, np.ndarray, str]:
-        """
-        执行寻优搜索
-        返回: (最小安全系数 min_fs, 最优参数 [xc*, yc*, R*], 搜索详情日志)
-        """
         pass

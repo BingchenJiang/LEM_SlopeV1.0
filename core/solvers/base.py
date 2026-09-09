@@ -38,3 +38,5 @@ class BaseLEMSolver(ABC):
         返回: (安全系数 Fs, 收敛状态说明)
         """
         pass
+    
+

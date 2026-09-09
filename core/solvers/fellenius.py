@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 瑞典条分法 (Fellenius / Ordinary / Swedish Circle Method)
-力学假定：忽略土条间的一切作用力 (E_i = X_i = 0)，仅满足滑动体整体绕圆心的力矩平衡。
+支持非饱和表观黏聚力、外荷载与拟静力地震荷载
 """
 import numpy as np
 from typing import Tuple, Optional
@@ -10,16 +10,17 @@ from core.solvers.base import BaseLEMSolver
 
 class FelleniusSolver(BaseLEMSolver):
     def solve(self) -> Tuple[Optional[float], str]:
-        # 滑动力矩驱动项
-        driving = sum(s.W * np.sin(s.alpha) for s in self.slices)
+        driving = sum(
+            s.W * np.sin(s.alpha) + s.Fh * np.cos(s.alpha)
+            for s in self.slices
+        )
         if driving <= 0:
             return None, "下滑滑动力矩 <= 0（边坡自然稳定）"
 
-        # 考虑孔隙水压折减有效法向力的抗滑阻力项
-        resisting = sum(
-            s.c * s.l + (s.W * np.cos(s.alpha) - s.u * s.l) * np.tan(s.phi)
-            for s in self.slices
-        )
+        resisting = 0.0
+        for s in self.slices:
+            N_eff = s.W * np.cos(s.alpha) - s.Fh * np.sin(s.alpha) - s.u * s.l
+            resisting += s.c * s.l + max(0.0, N_eff) * np.tan(s.phi)
 
         fs = resisting / driving
-        return fs, "单步显式解析解（忽略条间力）"
+        return fs, "单步显式解析解（含非饱和吸力与抗震）"

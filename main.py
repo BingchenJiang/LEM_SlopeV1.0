@@ -10,10 +10,12 @@ except ImportError:
     from PyQt6.QtWidgets import QApplication
 
 from gui.main_window import MainWindow
+from gui.icons import get_icon
 
 
 def main():
     app = QApplication(sys.argv)
+    app.setWindowIcon(get_icon("app_icon"))
     app.setStyle("Fusion")  # 设置应用程序的样式为 Fusion，提供一致的外观
     window = MainWindow()
     window.show()

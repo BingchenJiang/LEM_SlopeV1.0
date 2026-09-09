@@ -1,9 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 斯宾塞法 (Spencer Method)
-力学假定：完全平衡严密法，同时满足力平衡与整体力矩平衡。
-假定所有条间力的倾角为同一常数 θ（即条间剪力与法向力之比恒定：X_i / E_i = tan(θ) = λ）。
-通过牛顿法联立求解二维非线性方程组得到 (Fs, θ)。
+完全平衡法，支持非饱和吸力、外荷载与拟静力地震荷载
 """
 import numpy as np
 from typing import Tuple, Optional
@@ -18,7 +16,7 @@ class SpencerSolver(BaseLEMSolver):
         if F <= 0.1:
             return [1e5, 1e5]
 
-        E = 0.0  # 边界条件：坡顶外边缘条间推力 E_0 = 0
+        E = 0.0
         resisting_moment = 0.0
 
         for s in self.slices:
@@ -32,15 +30,13 @@ class SpencerSolver(BaseLEMSolver):
             if abs(denom) < 1e-6:
                 denom = 1e-6 if denom >= 0 else -1e-6
 
-            E_next = (E * (B - A * lam) + A * s.W - S0) / denom
-            N = ((E_next - E) + S0 * np.cos(alpha)) / A if abs(A) > 1e-5 else s.W * np.cos(alpha)
+            E_next = (E * (B - A * lam) + A * s.W + B * s.Fh - S0) / denom
+            N = ((E_next - E - s.Fh) + S0 * np.cos(alpha)) / A if abs(A) > 1e-5 else s.W * np.cos(alpha)
             T = S0 + N * (tan_phi / F)
             resisting_moment += T * self.R
             E = E_next
 
-        driving_moment = sum(s.W * self.R * np.sin(s.alpha) for s in self.slices)
-        # 残差 1: 坡脚末端条间推力归零 (E_n = 0)
-        # 残差 2: 整体力矩平衡残差归零
+        driving_moment = sum((s.W * np.sin(s.alpha) + s.Fh * np.cos(s.alpha)) * self.R for s in self.slices)
         return [E, resisting_moment - driving_moment]
 
     def solve(self) -> Tuple[Optional[float], str]:
@@ -49,7 +45,7 @@ class SpencerSolver(BaseLEMSolver):
         if init_fs is None:
             init_fs = 1.2
 
-        sol = root(self._evaluate_residuals, [init_fs, 0.0], method='hybr', tol=self.tol)
+        sol = root(self._evaluate_residuals, [init_fs, 0.0], method="hybr", tol=self.tol)
         if sol.success and sol.x[0] > 0:
             fs = sol.x[0]
             theta_deg = float(np.degrees(np.arctan(sol.x[1])))

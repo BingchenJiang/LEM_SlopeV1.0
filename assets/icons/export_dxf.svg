@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="30" y="30" width="196" height="196" rx="20" fill="#f8f9f9" stroke="#2c3e50" stroke-width="14"/>
+  <text x="45" y="85" font-family="Arial, sans-serif" font-weight="bold" font-size="44" fill="#27ae60">DXF</text>
+  <line x1="128" y1="185" x2="128" y2="95" stroke="#27ae60" stroke-width="20" stroke-linecap="round"/>
+  <polyline points="88,135 128,95 168,135" fill="none" stroke="#27ae60" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

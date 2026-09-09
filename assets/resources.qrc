@@ -1,0 +1,36 @@
+<!DOCTYPE RCC><RCC version="1.0">
+  <qresource prefix="/icons">
+    <file>icons/app_icon.svg</file>
+    <file>icons/app_icon.ico</file>
+    <file>icons/zoom_extents.svg</file>
+    <file>icons/zoom_extents.ico</file>
+    <file>icons/run_solvers.svg</file>
+    <file>icons/run_solvers.ico</file>
+    <file>icons/search_surface.svg</file>
+    <file>icons/search_surface.ico</file>
+    <file>icons/stop_search.svg</file>
+    <file>icons/stop_search.ico</file>
+    <file>icons/rainfall_time.svg</file>
+    <file>icons/rainfall_time.ico</file>
+    <file>icons/file_new.svg</file>
+    <file>icons/file_new.ico</file>
+    <file>icons/file_open.svg</file>
+    <file>icons/file_open.ico</file>
+    <file>icons/file_save.svg</file>
+    <file>icons/file_save.ico</file>
+    <file>icons/import_dxf.svg</file>
+    <file>icons/import_dxf.ico</file>
+    <file>icons/export_dxf.svg</file>
+    <file>icons/export_dxf.ico</file>
+    <file>icons/export_csv.svg</file>
+    <file>icons/export_csv.ico</file>
+    <file>icons/add_item.svg</file>
+    <file>icons/add_item.ico</file>
+    <file>icons/del_item.svg</file>
+    <file>icons/del_item.ico</file>
+    <file>icons/refresh.svg</file>
+    <file>icons/refresh.ico</file>
+    <file>icons/apply_surface.svg</file>
+    <file>icons/apply_surface.ico</file>
+  </qresource>
+</RCC>

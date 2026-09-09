@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-基于 QThread 的后台异步寻优工作线程
-确保大规模迭代计算期间图形界面响应流畅
+基于 QThread 的后台异步寻优计算工作线程
+保证多层土、水力与复杂荷载条件下的全局迭代计算期间 GUI 界面平滑响应
 """
 from PyQt5.QtCore import QThread, pyqtSignal
 from typing import List, Tuple
@@ -15,71 +15,55 @@ from core.search import (
 
 class OptimizationWorker(QThread):
     """全局优化搜索异步工作线程"""
-    progress_updated = pyqtSignal(int, int, float)      # 当前步, 总步数, 当前最优Fs
-    search_finished = pyqtSignal(float, list, str)      # 最优Fs, 最优参数[xc, yc, R], 说明信息
-    search_failed = pyqtSignal(str)                     # 错误或终止信息
+    progress_updated = pyqtSignal(int, int, float)
+    search_finished = pyqtSignal(float, list, str)
+    search_failed = pyqtSignal(str)
 
     def __init__(
         self,
         algo_name: str,
         eval_name: str,
         geom: SlopeGeometry,
-        material: SoilMaterial,
+        materials: List[SoilMaterial],
         bounds: List[Tuple[float, float]],
-        ru: float = 0.0,
-        use_water_table: bool = False,
+        rainfall_depth: float = 0.0,
+        kh: float = 0.0,
         parent=None
     ):
         super().__init__(parent)
         self.algo_name = algo_name
         self.eval_name = eval_name
         self.geom = geom
-        self.material = material
+        self.materials = materials
         self.bounds = bounds
-        self.ru = ru
-        self.use_water_table = use_water_table
+        self.rainfall_depth = rainfall_depth
+        self.kh = kh
         self._is_interrupted = False
 
     def stop(self):
-        """请求中断计算"""
         self._is_interrupted = True
 
     def run(self):
         try:
+            kwargs = {
+                "geom": self.geom,
+                "materials": self.materials,
+                "bounds": self.bounds,
+                "eval_method": self.eval_name,
+                "rainfall_depth": self.rainfall_depth,
+                "kh": self.kh
+            }
+
             if "PSO" in self.algo_name:
-                searcher = PSOSearcher(
-                    self.geom, self.material, self.bounds,
-                    eval_method=self.eval_name, ru=self.ru,
-                    use_water_table=self.use_water_table,
-                    n_particles=25, max_iter=30
-                )
+                searcher = PSOSearcher(**kwargs, n_particles=25, max_iter=30)
             elif "退火" in self.algo_name:
-                searcher = SimulatedAnnealingSearcher(
-                    self.geom, self.material, self.bounds,
-                    eval_method=self.eval_name, ru=self.ru,
-                    use_water_table=self.use_water_table,
-                    cooling_rate=0.90
-                )
+                searcher = SimulatedAnnealingSearcher(**kwargs, cooling_rate=0.90)
             elif "差分进化" in self.algo_name:
-                searcher = DifferentialEvolutionSearcher(
-                    self.geom, self.material, self.bounds,
-                    eval_method=self.eval_name, ru=self.ru,
-                    use_water_table=self.use_water_table,
-                    popsize=10, maxiter=20
-                )
+                searcher = DifferentialEvolutionSearcher(**kwargs, popsize=10, maxiter=20)
             elif "单纯形" in self.algo_name:
-                searcher = NelderMeadSearcher(
-                    self.geom, self.material, self.bounds,
-                    eval_method=self.eval_name, ru=self.ru,
-                    use_water_table=self.use_water_table
-                )
+                searcher = NelderMeadSearcher(**kwargs)
             else:
-                searcher = GridSearcher(
-                    self.geom, self.material, self.bounds,
-                    eval_method=self.eval_name, ru=self.ru,
-                    use_water_table=self.use_water_table,
-                    nx=10, ny=10, nr=8
-                )
+                searcher = GridSearcher(**kwargs, nx=10, ny=10, nr=8)
 
             def callback_fn(current, total, current_best):
                 if not self._is_interrupted:

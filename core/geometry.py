@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-边坡几何外轮廓、多层地层分界面、地下水位线与外荷载拓扑模块
+边坡几何外轮廓、任意起伏多层地层分界面、地下水位线与外荷载拓扑模块
 """
 import numpy as np
 from typing import List, Tuple, Optional
@@ -15,10 +15,12 @@ class SlopeGeometry:
         strata_boundaries: Optional[List[List[Tuple[float, float]]]] = None,
         surcharge_loads: Optional[List[Tuple[float, float, float]]] = None
     ):
+        # 1. 地表多段线 (按 X 坐标升序排列)
         sorted_ground = sorted(ground_coords, key=lambda p: p[0])
         self.gx = np.array([p[0] for p in sorted_ground], dtype=float)
         self.gy = np.array([p[1] for p in sorted_ground], dtype=float)
 
+        # 2. 地下水浸润线多段线
         if water_coords and len(water_coords) >= 2:
             sorted_water = sorted(water_coords, key=lambda p: p[0])
             self.wx = np.array([p[0] for p in sorted_water], dtype=float)
@@ -26,6 +28,7 @@ class SlopeGeometry:
         else:
             self.wx, self.wy = None, None
 
+        # 3. 任意数量的任意起伏地层分界面列表 (从上至下多段线)
         self.strata_lines = []
         if strata_boundaries:
             for sb in strata_boundaries:
@@ -35,6 +38,7 @@ class SlopeGeometry:
                     by = np.array([p[1] for p in sorted_sb], dtype=float)
                     self.strata_lines.append((bx, by))
 
+        # 4. 坡顶均布附加荷载 [(x1, x2, q)]
         self.surcharge_loads = surcharge_loads if surcharge_loads else []
 
     def get_ground_elevation(self, x: float) -> float:
@@ -46,9 +50,11 @@ class SlopeGeometry:
         return None
 
     def get_strata_elevations(self, x: float) -> List[float]:
+        """获取指定水平 X 坐标处全部地层分界折线的高程 (自上而下)"""
         return [float(np.interp(x, bx, by)) for bx, by in self.strata_lines]
 
     def get_layer_index_at(self, x: float, y: float) -> int:
+        """根据空间坐标判断所在土层序号 (0 为最上层，1 为第二层，依此类推)"""
         if not self.strata_lines:
             return 0
         elevs = self.get_strata_elevations(x)
