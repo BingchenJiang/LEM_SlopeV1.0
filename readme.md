@@ -2,7 +2,8 @@
 
 基于 **Python** 与 **PyQt (QGraphicsView CAD 架构)** 开发的边坡极限平衡法（LEM）稳定性计算与临界滑面智能全局寻优软件。
 
-[](https://github.com/BingchenJiang/LEM_SlopeV1.0/blob/master/docs/1.png)
+![image](master/docs/1.png)
+
 ---
 
 ## 核心功能特性
