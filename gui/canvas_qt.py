@@ -165,7 +165,8 @@ class SlopeGraphicsView(QGraphicsView):
         water_pts: list = None,
         strata_boundaries: list = None,
         rainfall_depth: float = 0.0,
-        surcharge_loads: list = None
+        surcharge_loads: list = None,
+        slip_surface = None
     ):
         self.scene.clear()
         if len(ground_x) < 2:
@@ -241,55 +242,53 @@ class SlopeGraphicsView(QGraphicsView):
                     load_line.setPen(pen_load)
                     self.scene.addItem(load_line)
 
-        # 6. 滑弧整圆参考线与十字圆心
-        circle_path = QPainterPath()
-        circle_path.addEllipse(QPointF(xc, yc), R, R)
-        ref_circle = QGraphicsPathItem(circle_path)
-        ref_pen = QPen(QColor(189, 195, 199), 1.0, Qt.DotLine)
-        ref_pen.setCosmetic(True)
-        ref_circle.setPen(ref_pen)
-        self.scene.addItem(ref_circle)
+        # 6. 绘制滑面几何轮廓 (智能区分圆弧与折线)
+        if slip_surface is not None and getattr(slip_surface, "surface_type", "") == "polygonal":
+            # 绘制非圆弧多段折线滑面
+            poly_path = QPainterPath()
+            poly_path.moveTo(slip_surface.px[0], slip_surface.py[0])
+            for px, py in zip(slip_surface.px[1:], slip_surface.py[1:]):
+                poly_path.lineTo(px, py)
+            poly_item = QGraphicsPathItem(poly_path)
+            poly_pen = QPen(QColor(192, 57, 43), 2.2, Qt.DashLine)
+            poly_pen.setCosmetic(True)
+            poly_item.setPen(poly_pen)
+            self.scene.addItem(poly_item)
+        else:
+            # 绘制圆弧参考虚线与圆心十字标
+            circle_path = QPainterPath()
+            circle_path.addEllipse(QPointF(xc, yc), R, R)
+            ref_circle = QGraphicsPathItem(circle_path)
+            ref_pen = QPen(QColor(189, 195, 199), 1.0, Qt.DotLine)
+            ref_pen.setCosmetic(True)
+            ref_circle.setPen(ref_pen)
+            self.scene.addItem(ref_circle)
 
-        cs = 1.0
-        c_h = QGraphicsLineItem(xc - cs, yc, xc + cs, yc)
-        c_v = QGraphicsLineItem(xc, yc - cs, xc, yc + cs)
-        c_pen = QPen(QColor(192, 57, 43), 2.0)
-        c_pen.setCosmetic(True)
-        c_h.setPen(c_pen)
-        c_v.setPen(c_pen)
-        self.scene.addItem(c_h)
-        self.scene.addItem(c_v)
+            cs = 1.2
+            c_h = QGraphicsLineItem(xc - cs, yc, xc + cs, yc)
+            c_v = QGraphicsLineItem(xc, yc - cs, xc, yc + cs)
+            c_pen = QPen(QColor(192, 57, 43), 2.0)
+            c_pen.setCosmetic(True)
+            c_h.setPen(c_pen); c_v.setPen(c_pen)
+            self.scene.addItem(c_h); self.scene.addItem(c_v)
 
-        # 7. 离散土条微元多边形
+        # 7. 绘制各个离散切片土条多边形 (直接使用土条底面 y_base，不再用圆方程硬算!)
         if slices:
             for s in slices:
                 xl = s.xm - 0.5 * s.b
                 xr = s.xm + 0.5 * s.b
                 yt_l = float(np.interp(xl, ground_x, ground_y))
                 yt_r = float(np.interp(xr, ground_x, ground_y))
-                yb_l = float(yc - np.sqrt(max(0, R**2 - (xl - xc)**2)))
-                yb_r = float(yc - np.sqrt(max(0, R**2 - (xr - xc)**2)))
+                # 真实底高程：直接使用土条自身计算的 y_base
+                yb = s.y_base
 
                 slice_poly = QPolygonF([
-                    QPointF(xl, yb_l),
-                    QPointF(xr, yb_r),
+                    QPointF(xl, yb),
+                    QPointF(xr, yb),
                     QPointF(xr, yt_r),
                     QPointF(xl, yt_l)
                 ])
                 slice_item = SliceGraphicsItem(s, slice_poly)
                 self.scene.addItem(slice_item)
-
-            slip_path = QPainterPath()
-            xs_edge = [s.xm - 0.5 * s.b for s in slices] + [slices[-1].xm + 0.5 * slices[-1].b]
-            ys_edge = [float(yc - np.sqrt(max(0, R**2 - (x - xc)**2))) for x in xs_edge]
-            slip_path.moveTo(xs_edge[0], ys_edge[0])
-            for x, y in zip(xs_edge[1:], ys_edge[1:]):
-                slip_path.lineTo(x, y)
-            
-            slip_item = QGraphicsPathItem(slip_path)
-            slip_pen = QPen(QColor(231, 76, 60), 2.5)
-            slip_pen.setCosmetic(True)
-            slip_item.setPen(slip_pen)
-            self.scene.addItem(slip_item)
 
         self.scene.setSceneRect(min_x, min_y, (max_x - min_x) * 1.05, (max_y - min_y) * 1.05)

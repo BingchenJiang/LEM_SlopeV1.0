@@ -9,10 +9,10 @@ from PyQt5.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QProgressBar, QCheckBox, QTreeWidget, QTreeWidgetItem, QSlider, QScrollArea, QFrame
+    QProgressBar, QCheckBox, QTreeWidget, QTreeWidgetItem, QSlider, QScrollArea, QFrame, QRadioButton, QCheckBox
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-
+from core.slip_surface import BaseSlipSurface, CircularSlipSurface, PolygonalSlipSurface
 from core.materials import SoilMaterial
 from core.rainfall import RainfallTimeSeries
 from core.slicing import Slice
@@ -203,6 +203,41 @@ class GeometryDockWidget(QDockWidget):
     def get_strata_lines(self) -> List[List[Tuple[float, float]]]:
         self._save_current_table_data()
         return self.data_strata
+    
+    def to_dict(self) -> Dict[str, Any]:
+        self._save_current_table_data()
+        return {
+            "ground": [list(p) for p in self.data_ground],
+            "water":  [list(p) for p in self.data_water] if self.data_water else None,
+            "strata": [[list(p) for p in line] for line in self.data_strata],
+        }
+
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+        if data.get("ground") and len(data["ground"]) >= 2:
+            self.data_ground = [(float(x), float(y)) for x, y in data["ground"]]
+        if data.get("water"):
+            self.data_water = [(float(x), float(y)) for x, y in data["water"]]
+        else:
+            self.data_water = None
+
+        self.data_strata = []
+        for line in data.get("strata", []) or []:
+            if len(line) >= 2:
+                self.data_strata.append([(float(x), float(y)) for x, y in line])
+
+        # 重建地层树
+        while self.item_strata_root.childCount() > 0:
+            self.item_strata_root.removeChild(self.item_strata_root.child(0))
+        for idx, line in enumerate(self.data_strata):
+            child = QTreeWidgetItem([f"第{idx + 1}分界面", str(len(line))])
+            self.item_strata_root.addChild(child)
+        self.item_strata_root.setText(1, str(len(self.data_strata)))
+
+        # 刷新当前正在编辑的表
+        self.tree.setCurrentItem(self.item_ground)
+        self._load_table_data(self.data_ground)
 
 
 class MaterialDockWidget(QDockWidget):
@@ -314,7 +349,54 @@ class MaterialDockWidget(QDockWidget):
 
     def get_materials_list(self) -> List[SoilMaterial]:
         return self.materials_db
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "active_regime": self.combo_regime.currentIndex(),
+            "current_layer": self.combo_layer.currentIndex(),
+            "layers": [
+                {
+                    "name": m.name,
+                    "gamma_dry": m.gamma_dry,
+                    "gamma_sat": m.gamma_sat,
+                    "c_prime": m.c_prime,
+                    "phi_deg": m.phi_deg,
+                    "is_unsaturated": m.is_unsaturated,
+                    "phi_b_deg": m.phi_b_deg,
+                    "suction_cutoff": m.suction_cutoff,
+                }
+                for m in self.materials_db
+            ],
+        }
 
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+        layers = data.get("layers", [])
+        if layers:
+            new_db = []
+            for L in layers:
+                new_db.append(SoilMaterial(
+                    name=L.get("name", "土层"),
+                    gamma_dry=float(L.get("gamma_dry", 19.0)),
+                    gamma_sat=float(L.get("gamma_sat", 21.0)),
+                    c_prime=float(L.get("c_prime", 15.0)),
+                    phi_deg=float(L.get("phi_deg", 20.0)),
+                    is_unsaturated=bool(L.get("is_unsaturated", False)),
+                    phi_b_deg=float(L.get("phi_b_deg", 15.0)),
+                    suction_cutoff=float(L.get("suction_cutoff", 100.0)),
+                ))
+            self.materials_db = new_db
+
+        # 恢复 combo 选择
+        regime = int(data.get("active_regime", 0))
+        self.combo_regime.setCurrentIndex(regime)
+        self.grp_unsat.setEnabled(regime == 1)
+
+        layer_idx = int(data.get("current_layer", 0))
+        if 0 <= layer_idx < len(self.materials_db):
+            self.combo_layer.setCurrentIndex(layer_idx)
+            self._load_layer_params(layer_idx)
 
 class RainfallDockWidget(QDockWidget):
     """动态时序降雨过程与时间轴控制停靠窗"""
@@ -375,6 +457,28 @@ class RainfallDockWidget(QDockWidget):
 
         layout.addWidget(grp_slider, stretch=4)
         self.setWidget(container)
+        
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "series": [[float(t), float(i)] for t, i in self._get_time_series_data()],
+            "ks_mm_h": self.spin_ks.value(),
+            "delta_theta": self.spin_theta.value(),
+            "current_time": self.slider_time.value(),
+        }
+
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+        series = data.get("series", [])
+        if series:
+            self.tbl_rain.setRowCount(len(series))
+            for r, (t, i) in enumerate(series):
+                self.tbl_rain.setItem(r, 0, QTableWidgetItem(str(t)))
+                self.tbl_rain.setItem(r, 1, QTableWidgetItem(str(i)))
+
+        self.spin_ks.setValue(float(data.get("ks_mm_h", 15.0)))
+        self.spin_theta.setValue(float(data.get("delta_theta", 0.20)))
+        self.slider_time.setValue(int(data.get("current_time", 0)))
 
     def _get_time_series_data(self) -> List[Tuple[float, float]]:
         series = []
@@ -453,10 +557,31 @@ class LoadsDockWidget(QDockWidget):
 
     def get_seismic_kh(self) -> float:
         return self.spin_kh.value()
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "q": self.spin_q.value(),
+            "x1": self.spin_qx1.value(),
+            "x2": self.spin_qx2.value(),
+            "kh": self.spin_kh.value(),
+        }
+
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+        self.spin_q.setValue(float(data.get("q", 0.0)))
+        self.spin_qx1.setValue(float(data.get("x1", 5.0)))
+        self.spin_qx2.setValue(float(data.get("x2", 18.0)))
+        self.spin_kh.setValue(float(data.get("kh", 0.0)))
 
 
 class SearchDockWidget(QDockWidget):
-    """滑面寻优与求解控制停靠窗"""
+    """支持圆弧与非圆弧折线双模式定义与全局寻优控制面板
+
+    非圆弧模式支持两种行为:
+      - 自动搜索 (chk_poly_auto_search 勾选): 表格里的点作为形状参考, DE 搜索最优
+      - 手动试算 (chk_poly_auto_search 未勾选): 表格里的点就是最终滑面, 只算一次 Fs
+    """
     calculate_requested = pyqtSignal()
     search_requested = pyqtSignal()
     search_stop_requested = pyqtSignal()
@@ -464,64 +589,145 @@ class SearchDockWidget(QDockWidget):
     preview_circle_changed = pyqtSignal()
 
     def __init__(self, parent=None):
-        super().__init__("滑弧求解与全局智能寻优", parent)
+        super().__init__("滑面定义与全局稳定性寻优", parent)
         self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
         self._init_ui()
 
+    # ------------------------------------------------------------------
+    # UI 构建
+    # ------------------------------------------------------------------
     def _init_ui(self):
         container = QWidget()
         layout = QVBoxLayout(container)
 
-        grp_circle = QGroupBox("指定试算滑弧参数")
+        # ---------- 1. 滑动面形态选择 ----------
+        grp_shape = QGroupBox("1. 滑动面形态选择 (Slip Surface Shape)")
+        f_shape = QFormLayout()
+        self.combo_surface_type = QComboBox()
+        self.combo_surface_type.addItems([
+            "圆弧滑动面 (Circular)",
+            "非圆弧多段折线面 (Polygonal / Non-Circular)"
+        ])
+        self.combo_surface_type.currentIndexChanged.connect(self._on_surface_type_changed)
+        f_shape.addRow("滑面类型:", self.combo_surface_type)
+        grp_shape.setLayout(f_shape)
+        layout.addWidget(grp_shape)
+
+        # ---------- 2. 圆弧几何参数 ----------
+        self.grp_circle = QGroupBox("圆弧几何参数 (指定滑面)")
         form_circle = QFormLayout()
-        self.spin_xc = QDoubleSpinBox(); self.spin_xc.setRange(-200.0, 200.0); self.spin_xc.setValue(25.0); self.spin_xc.setSuffix(" m")
-        self.spin_yc = QDoubleSpinBox(); self.spin_yc.setRange(-200.0, 200.0); self.spin_yc.setValue(22.0); self.spin_yc.setSuffix(" m")
-        self.spin_r = QDoubleSpinBox(); self.spin_r.setRange(1.0, 300.0); self.spin_r.setValue(23.0); self.spin_r.setSuffix(" m")
+        self.spin_xc = QDoubleSpinBox(); self.spin_xc.setRange(-200.0, 500.0); self.spin_xc.setValue(25.0); self.spin_xc.setSuffix(" m")
+        self.spin_yc = QDoubleSpinBox(); self.spin_yc.setRange(-200.0, 500.0); self.spin_yc.setValue(22.0); self.spin_yc.setSuffix(" m")
+        self.spin_r = QDoubleSpinBox(); self.spin_r.setRange(1.0, 500.0); self.spin_r.setValue(23.0); self.spin_r.setSuffix(" m")
         self.spin_slices = QSpinBox(); self.spin_slices.setRange(10, 150); self.spin_slices.setValue(30); self.spin_slices.setSuffix(" 个")
         form_circle.addRow("滑弧圆心 Xc:", self.spin_xc)
         form_circle.addRow("滑弧圆心 Yc:", self.spin_yc)
         form_circle.addRow("滑弧半径 R:", self.spin_r)
         form_circle.addRow("切片土条数 N:", self.spin_slices)
-        grp_circle.setLayout(form_circle)
-        layout.addWidget(grp_circle)
+        self.grp_circle.setLayout(form_circle)
+        layout.addWidget(self.grp_circle)
 
-        btn_preview = QPushButton("预览指定滑面网格")
+        # ---------- 3. 非圆弧控制折点表 ----------
+        self.grp_poly = QGroupBox("非圆弧控制折点表 (指定滑面)")
+        l_poly = QVBoxLayout()
+
+        # 3.1 双模式复选框
+        self.chk_poly_auto_search = QCheckBox("启用自动搜索 (未勾选则仅按表中坐标试算)")
+        self.chk_poly_auto_search.setChecked(True)
+        self.chk_poly_auto_search.setToolTip(
+            "✓ 勾选: 表格里的点作为形状参考, 算法在附近搜索最优滑面\n"
+            "✗ 未勾选: 表格里的点就是最终滑面, 只算一次 Fs"
+        )
+        l_poly.addWidget(self.chk_poly_auto_search)
+
+        # 3.2 折点表
+        self.tbl_poly = QTableWidget(3, 2)
+        self.tbl_poly.setHorizontalHeaderLabels(["X 坐标 (m)", "Y 高程 (m)"])
+        default_poly = [(12.0, 15.0), (25.0, 4.0), (38.0, 0.0)]
+        for r, (x, y) in enumerate(default_poly):
+            self.tbl_poly.setItem(r, 0, QTableWidgetItem(str(x)))
+            self.tbl_poly.setItem(r, 1, QTableWidgetItem(str(y)))
+        self.tbl_poly.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.tbl_poly.itemChanged.connect(lambda _: self.preview_circle_changed.emit())
+        l_poly.addWidget(self.tbl_poly)
+
+        # 3.3 增删点按钮
+        btn_poly_bar = QHBoxLayout()
+        btn_add_p = QPushButton("添加折点")
+        btn_add_p.clicked.connect(self._add_poly_point)
+        btn_del_p = QPushButton("删除选中")
+        btn_del_p.clicked.connect(self._del_poly_point)
+        btn_poly_bar.addWidget(btn_add_p)
+        btn_poly_bar.addWidget(btn_del_p)
+        l_poly.addLayout(btn_poly_bar)
+
+        self.grp_poly.setLayout(l_poly)
+        self.grp_poly.setVisible(False)
+        layout.addWidget(self.grp_poly)
+
+        # ---------- 4. 预览按钮 ----------
+        btn_preview = QPushButton("刷新并预览当前滑面网格")
         btn_preview.setIcon(get_icon("refresh"))
         btn_preview.clicked.connect(self.preview_circle_changed.emit)
         layout.addWidget(btn_preview)
 
-        grp_algo = QGroupBox("临界最危险滑面全局寻优")
-        form_algo = QFormLayout()
+        # ---------- 5. 选用力学模型 ----------
+        grp_solver = QGroupBox("2. 选用求解模型 (Target Method)")
+        f_solver = QFormLayout()
+        self.combo_solver = QComboBox()
+        self.combo_solver.addItems([
+            "斯宾塞法 (Spencer 完全平衡法) [通用]",
+            "摩根斯坦-普赖斯法 (Morgenstern-Price) [通用]",
+            "简化让布法 (Simplified Janbu) [通用]",
+            "简化毕肖普法 (Simplified Bishop) [仅圆弧]",
+            "瑞典条分法 (Fellenius / Ordinary) [仅圆弧]"
+        ])
+        f_solver.addRow("力学模型:", self.combo_solver)
+        grp_solver.setLayout(f_solver)
+        layout.addWidget(grp_solver)
+
+        # ---------- 6. 全局寻优设置 ----------
+        self.grp_algo = QGroupBox("3. 最危险滑面全局寻优")
+        self.form_algo = QFormLayout()
         self.combo_algo = QComboBox()
         self.combo_algo.addItems([
+            "差分进化算法 (Differential Evolution, 推荐)",
             "粒子群优化算法 (PSO)",
             "模拟退火算法 (Simulated Annealing)",
-            "差分进化算法 (Differential Evolution)",
             "单纯形搜索法 (Nelder-Mead)",
             "传统网格扫描法 (Grid Search)"
         ])
         self.combo_eval = QComboBox()
-        self.combo_eval.addItems(["Simplified Bishop (推荐/高效)", "Fellenius / Ordinary"])
-        form_algo.addRow("寻优算法:", self.combo_algo)
-        form_algo.addRow("目标模型:", self.combo_eval)
+        self.combo_eval.addItems([
+            "Spencer 完全平衡法",
+            "Simplified Bishop (圆弧)",
+            "Simplified Janbu"
+        ])
+        self.form_algo.addRow("寻优算法:", self.combo_algo)
+        self.form_algo.addRow("寻优评价模型:", self.combo_eval)
 
-        self.spin_xmin = QDoubleSpinBox(); self.spin_xmin.setValue(10.0)
-        self.spin_xmax = QDoubleSpinBox(); self.spin_xmax.setValue(45.0)
-        self.spin_ymin = QDoubleSpinBox(); self.spin_ymin.setValue(15.0)
-        self.spin_ymax = QDoubleSpinBox(); self.spin_ymax.setValue(40.0)
-        self.spin_rmin = QDoubleSpinBox(); self.spin_rmin.setValue(10.0)
-        self.spin_rmax = QDoubleSpinBox(); self.spin_rmax.setValue(45.0)
+        # 范围包络控件 (自适应圆弧/折线标签)
+        self.lbl_b1 = QLabel("Xc 搜索范围 (m):")
+        self.lbl_b2 = QLabel("Yc 搜索范围 (m):")
+        self.lbl_b3 = QLabel("半径 R 范围 (m):")
+        self.spin_b1_min = QDoubleSpinBox(); self.spin_b1_min.setRange(-500, 500); self.spin_b1_min.setValue(10.0)
+        self.spin_b1_max = QDoubleSpinBox(); self.spin_b1_max.setRange(-500, 500); self.spin_b1_max.setValue(45.0)
+        self.spin_b2_min = QDoubleSpinBox(); self.spin_b2_min.setRange(-500, 500); self.spin_b2_min.setValue(15.0)
+        self.spin_b2_max = QDoubleSpinBox(); self.spin_b2_max.setRange(-500, 500); self.spin_b2_max.setValue(40.0)
+        self.spin_b3_min = QDoubleSpinBox(); self.spin_b3_min.setRange(-500, 500); self.spin_b3_min.setValue(10.0)
+        self.spin_b3_max = QDoubleSpinBox(); self.spin_b3_max.setRange(-500, 500); self.spin_b3_max.setValue(45.0)
 
-        h_x = QHBoxLayout(); h_x.addWidget(self.spin_xmin); h_x.addWidget(QLabel("~")); h_x.addWidget(self.spin_xmax)
-        h_y = QHBoxLayout(); h_y.addWidget(self.spin_ymin); h_y.addWidget(QLabel("~")); h_y.addWidget(self.spin_ymax)
-        h_r = QHBoxLayout(); h_r.addWidget(self.spin_rmin); h_r.addWidget(QLabel("~")); h_r.addWidget(self.spin_rmax)
+        h_b1 = QHBoxLayout(); h_b1.addWidget(self.spin_b1_min); h_b1.addWidget(QLabel("~")); h_b1.addWidget(self.spin_b1_max)
+        h_b2 = QHBoxLayout(); h_b2.addWidget(self.spin_b2_min); h_b2.addWidget(QLabel("~")); h_b2.addWidget(self.spin_b2_max)
+        h_b3 = QHBoxLayout(); h_b3.addWidget(self.spin_b3_min); h_b3.addWidget(QLabel("~")); h_b3.addWidget(self.spin_b3_max)
 
-        form_algo.addRow("Xc 包络 (m):", h_x)
-        form_algo.addRow("Yc 包络 (m):", h_y)
-        form_algo.addRow("半径 R 包络 (m):", h_r)
-        grp_algo.setLayout(form_algo)
-        layout.addWidget(grp_algo)
+        self.form_algo.addRow(self.lbl_b1, h_b1)
+        self.form_algo.addRow(self.lbl_b2, h_b2)
+        self.form_algo.addRow(self.lbl_b3, h_b3)
+        self.grp_algo.setLayout(self.form_algo)
+        layout.addWidget(self.grp_algo)
 
+        # ---------- 7. 控制按钮 + 进度条 + 结果 ----------
         h_btn_search = QHBoxLayout()
         self.btn_search = QPushButton("启动最危险滑面搜索")
         self.btn_search.setIcon(get_icon("search_surface"))
@@ -541,43 +747,261 @@ class SearchDockWidget(QDockWidget):
         self.prog_bar.setValue(0)
         layout.addWidget(self.prog_bar)
 
-        self.lbl_best = QLabel("最危险滑弧: 未搜索")
-        self.lbl_best.setStyleSheet("font-weight: bold; color: #c0392b;")
+        self.lbl_best = QLabel("最危险滑面: 未搜索")
+        self.lbl_best.setStyleSheet("font-weight: bold; color: #c0392b; font-size: 13px;")
         layout.addWidget(self.lbl_best)
 
-        btn_apply = QPushButton("应用最危险滑面至模型")
-        btn_apply.setIcon(get_icon("apply_surface"))
-        btn_apply.clicked.connect(self.apply_searched_circle.emit)
-        layout.addWidget(btn_apply)
+        self.btn_apply = QPushButton("应用最危险滑面至模型")
+        self.btn_apply.setIcon(get_icon("apply_surface"))
+        self.btn_apply.clicked.connect(self.apply_searched_circle.emit)
+        layout.addWidget(self.btn_apply)
 
-        btn_run_all = QPushButton("运行全部 5 种 LEM 模型求解")
-        btn_run_all.setIcon(get_icon("run_solvers"))
-        btn_run_all.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; font-size: 13px; padding: 8px;")
-        btn_run_all.clicked.connect(self.calculate_requested.emit)
-        layout.addWidget(btn_run_all)
+        # ---------- 8. 定向执行分析主按钮 ----------
+        self.btn_run_all = QPushButton("执行稳定性分析 (所选模型)")
+        self.btn_run_all.setIcon(get_icon("run_solvers"))
+        self.btn_run_all.setStyleSheet("background-color: #27ae60; color: white; font-weight: bold; font-size: 13px; padding: 8px;")
+        self.btn_run_all.clicked.connect(self.calculate_requested.emit)
+        layout.addWidget(self.btn_run_all)
 
         layout.addStretch()
-        self.setWidget(container)
 
-    def get_circle_params(self) -> Tuple[float, float, float, int]:
-        return (self.spin_xc.value(), self.spin_yc.value(), self.spin_r.value(), self.spin_slices.value())
+        # ---------- 9. 滚动容器 ----------
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(container)
+        self.setWidget(scroll)
+
+    # ------------------------------------------------------------------
+    # 滑面类型切换
+    # ------------------------------------------------------------------
+    def _on_surface_type_changed(self, idx: int):
+        is_circle = (idx == 0)
+
+        # 1. 切换指定滑面参数面板
+        if hasattr(self, "grp_circle"):
+            self.grp_circle.setVisible(is_circle)
+        if hasattr(self, "grp_poly"):
+            self.grp_poly.setVisible(not is_circle)
+
+        # 2. 寻优面板始终启用，仅动态更新标题
+        if hasattr(self, "grp_algo"):
+            self.grp_algo.setEnabled(True)
+            if is_circle:
+                self.grp_algo.setTitle("3. 最危险滑面全局寻优 (圆弧: Xc, Yc, R 搜索范围)")
+            else:
+                self.grp_algo.setTitle("3. 最危险滑面全局寻优 (非圆弧: 端点X, 底标高Y 搜索范围)")
+
+        # 3. 求解模型适用性过滤
+        if hasattr(self, "combo_solver"):
+            for i in range(self.combo_solver.count()):
+                txt = self.combo_solver.itemText(i)
+                if "仅圆弧" in txt:
+                    self.combo_solver.model().item(i).setEnabled(is_circle)
+            if not is_circle and "仅圆弧" in self.combo_solver.currentText():
+                self.combo_solver.setCurrentIndex(0)
+
+        # 4. 双模式复选框仅对非圆弧可用
+        if hasattr(self, "chk_poly_auto_search"):
+            self.chk_poly_auto_search.setEnabled(not is_circle)
+
+        # 5. 更新 bounds 标签
+        if hasattr(self, "lbl_b1"):
+            if is_circle:
+                self.lbl_b1.setText("Xc 搜索范围 (m):")
+                self.lbl_b2.setText("Yc 搜索范围 (m):")
+                self.lbl_b3.setText("半径 R 范围 (m):")
+            else:
+                self.lbl_b1.setText("后缘 X 范围 (m):")
+                self.lbl_b2.setText("滑底 Y 范围 (m):")
+                self.lbl_b3.setText("坡脚 X 范围 (m):")
+
+        # 6. 触发剖分与渲染
+        self.preview_circle_changed.emit()
+
+    # ------------------------------------------------------------------
+    # 折点表操作
+    # ------------------------------------------------------------------
+    def _add_poly_point(self):
+        row = self.tbl_poly.rowCount()
+        self.tbl_poly.insertRow(row)
+        self.tbl_poly.setItem(row, 0, QTableWidgetItem("30.0"))
+        self.tbl_poly.setItem(row, 1, QTableWidgetItem("2.0"))
+        self.preview_circle_changed.emit()
+
+    def _del_poly_point(self):
+        cur = self.tbl_poly.currentRow()
+        if cur >= 0 and self.tbl_poly.rowCount() > 2:
+            self.tbl_poly.removeRow(cur)
+            self.preview_circle_changed.emit()
+
+    def get_poly_points(self):
+        """从折点表读取所有有效点 (按 X 升序)"""
+        pts = []
+        for r in range(self.tbl_poly.rowCount()):
+            try:
+                x_item = self.tbl_poly.item(r, 0)
+                y_item = self.tbl_poly.item(r, 1)
+                if x_item is None or y_item is None:
+                    continue
+                x = float(x_item.text())
+                y = float(y_item.text())
+                pts.append((x, y))
+            except (ValueError, AttributeError):
+                continue
+        pts.sort(key=lambda p: p[0])
+        return pts
+
+    def set_poly_points(self, points):
+        """把 [(x,y), ...] 回填到折点表"""
+        self.tbl_poly.blockSignals(True)
+        self.tbl_poly.setRowCount(len(points))
+        for r, (x, y) in enumerate(points):
+            self.tbl_poly.setItem(r, 0, QTableWidgetItem(f"{float(x):.3f}"))
+            self.tbl_poly.setItem(r, 1, QTableWidgetItem(f"{float(y):.3f}"))
+        self.tbl_poly.blockSignals(False)
+        self.preview_circle_changed.emit()
+
+    # ------------------------------------------------------------------
+    # 双模式开关
+    # ------------------------------------------------------------------
+    def get_poly_auto_search(self) -> bool:
+        return bool(self.chk_poly_auto_search.isChecked())
+
+    def set_poly_auto_search(self, flag: bool):
+        self.chk_poly_auto_search.setChecked(bool(flag))
+
+    # ------------------------------------------------------------------
+    # 供 MainWindow 调用的接口
+    # ------------------------------------------------------------------
+    def get_surface_type(self) -> str:
+        return "circular" if self.combo_surface_type.currentIndex() == 0 else "polygonal"
+
+    def get_circle_params(self):
+        return (self.spin_xc.value(), self.spin_yc.value(),
+                self.spin_r.value(), self.spin_slices.value())
 
     def set_circle_params(self, xc: float, yc: float, R: float):
         self.spin_xc.setValue(xc)
         self.spin_yc.setValue(yc)
         self.spin_r.setValue(R)
 
+    def get_slip_surface(self):
+        """获取当前界面的滑面对象"""
+        from core.slip_surface import CircularSlipSurface, PolygonalSlipSurface
+        if self.combo_surface_type.currentIndex() == 0:
+            return CircularSlipSurface(
+                self.spin_xc.value(), self.spin_yc.value(), self.spin_r.value()
+            )
+        else:
+            pts = self.get_poly_points()
+            if len(pts) < 2:
+                pts = [(12.0, 15.0), (25.0, 4.0), (38.0, 0.0)]
+            return PolygonalSlipSurface(pts)
+
+    def get_selected_method_name(self) -> str:
+        return self.combo_solver.currentText()
+
     def get_search_config(self):
+        stype = self.get_surface_type()
         algo_name = self.combo_algo.currentText()
-        eval_name = "Bishop" if "Bishop" in self.combo_eval.currentText() else "Fellenius"
+
+        txt = self.combo_eval.currentText()
+        if "Janbu" in txt:
+            eval_name = "Janbu"
+        elif "Bishop" in txt:
+            eval_name = "Bishop"
+        elif "Spencer" in txt:
+            eval_name = "Spencer"
+        else:
+            eval_name = "Spencer"
+
         bounds = [
-            (self.spin_xmin.value(), self.spin_xmax.value()),
-            (self.spin_ymin.value(), self.spin_ymax.value()),
-            (self.spin_rmin.value(), self.spin_rmax.value()),
+            (self.spin_b1_min.value(), self.spin_b1_max.value()),
+            (self.spin_b2_min.value(), self.spin_b2_max.value()),
+            (self.spin_b3_min.value(), self.spin_b3_max.value()),
         ]
-        return algo_name, eval_name, bounds
+        ref_pts = self.get_poly_points()
+        auto_search = self.get_poly_auto_search()
+        return stype, algo_name, eval_name, bounds, ref_pts, auto_search
 
+    # ------------------------------------------------------------------
+    # 工程文件持久化
+    # ------------------------------------------------------------------
+    def to_dict(self):
+        return {
+            "surface_type": self.get_surface_type(),
+            "circle": {
+                "xc": self.spin_xc.value(),
+                "yc": self.spin_yc.value(),
+                "R":  self.spin_r.value(),
+                "n_slices": self.spin_slices.value(),
+            },
+            "polygon": [list(p) for p in self.get_poly_points()],
+            "poly_auto_search": self.get_poly_auto_search(),
+            "search_bounds": {
+                "b1": [self.spin_b1_min.value(), self.spin_b1_max.value()],
+                "b2": [self.spin_b2_min.value(), self.spin_b2_max.value()],
+                "b3": [self.spin_b3_min.value(), self.spin_b3_max.value()],
+            },
+            "search_algo": self.combo_algo.currentIndex(),
+            "search_eval": self.combo_eval.currentIndex(),
+            "solver_method": self.combo_solver.currentIndex(),
+        }
 
+    def from_dict(self, data):
+        if not isinstance(data, dict):
+            return
+
+        # 滑面类型
+        stype = data.get("surface_type", "circular")
+        self.combo_surface_type.setCurrentIndex(0 if stype == "circular" else 1)
+
+        # 圆弧参数
+        c = data.get("circle", {}) or {}
+        self.spin_xc.setValue(float(c.get("xc", 25.0)))
+        self.spin_yc.setValue(float(c.get("yc", 22.0)))
+        self.spin_r.setValue(float(c.get("R", 23.0)))
+        self.spin_slices.setValue(int(c.get("n_slices", 30)))
+
+        # 折线点
+        poly = data.get("polygon", [])
+        if poly:
+            self.tbl_poly.blockSignals(True)
+            self.tbl_poly.setRowCount(len(poly))
+            for r, (x, y) in enumerate(poly):
+                self.tbl_poly.setItem(r, 0, QTableWidgetItem(f"{float(x):.3f}"))
+                self.tbl_poly.setItem(r, 1, QTableWidgetItem(f"{float(y):.3f}"))
+            self.tbl_poly.blockSignals(False)
+
+        # 双模式
+        if "poly_auto_search" in data:
+            self.set_poly_auto_search(bool(data["poly_auto_search"]))
+
+        # 搜索包络
+        b = data.get("search_bounds", {}) or {}
+        for key, spin_min, spin_max in (
+            ("b1", self.spin_b1_min, self.spin_b1_max),
+            ("b2", self.spin_b2_min, self.spin_b2_max),
+            ("b3", self.spin_b3_min, self.spin_b3_max),
+        ):
+            pair = b.get(key)
+            if pair and len(pair) == 2:
+                spin_min.setValue(float(pair[0]))
+                spin_max.setValue(float(pair[1]))
+
+        # 算法与模型
+        if "search_algo" in data:
+            self.combo_algo.setCurrentIndex(int(data["search_algo"]))
+        if "search_eval" in data:
+            self.combo_eval.setCurrentIndex(int(data["search_eval"]))
+        if "solver_method" in data:
+            self.combo_solver.setCurrentIndex(int(data["solver_method"]))
+
+        # 让界面根据类型刷新
+        self._on_surface_type_changed(self.combo_surface_type.currentIndex())
+        
+        
 class ResultsDockWidget(QDockWidget):
     """计算结果、降雨时程与微元表格停靠窗"""
     def __init__(self, parent=None):
@@ -652,6 +1076,86 @@ class ResultsDockWidget(QDockWidget):
             self.tbl_slices.setItem(r, 12, QTableWidgetItem(f"{np.degrees(s.phi):.1f}"))
             self.tbl_slices.setItem(r, 13, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
             self.tbl_slices.setItem(r, 14, QTableWidgetItem(f"{s.l:.2f}"))
+            
+    def get_poly_points(self):
+        """从折线表格读回所有点 (供保存使用)"""
+        pts = []
+        for r in range(self.tbl_poly.rowCount()):
+            try:
+                x = float(self.tbl_poly.item(r, 0).text())
+                y = float(self.tbl_poly.item(r, 1).text())
+                pts.append((x, y))
+            except Exception:
+                continue
+        return pts
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "surface_type": self.get_surface_type(),
+            "circle": {
+                "xc": self.spin_xc.value(),
+                "yc": self.spin_yc.value(),
+                "R": self.spin_r.value(),
+                "n_slices": self.spin_slices.value(),
+            },
+            "polygon": [list(p) for p in self.get_poly_points()],
+            "search_bounds": {
+                "b1": [self.spin_b1_min.value(), self.spin_b1_max.value()],
+                "b2": [self.spin_b2_min.value(), self.spin_b2_max.value()],
+                "b3": [self.spin_b3_min.value(), self.spin_b3_max.value()],
+            },
+            "search_algo": self.combo_algo.currentIndex(),
+            "search_eval": self.combo_eval.currentIndex(),
+            "solver_method": self.combo_solver.currentIndex(),
+        }
+
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+
+        # 滑面类型
+        stype = data.get("surface_type", "circular")
+        self.combo_surface_type.setCurrentIndex(0 if stype == "circular" else 1)
+
+        # 圆弧参数
+        c = data.get("circle", {}) or {}
+        self.spin_xc.setValue(float(c.get("xc", 25.0)))
+        self.spin_yc.setValue(float(c.get("yc", 22.0)))
+        self.spin_r.setValue(float(c.get("R", 23.0)))
+        self.spin_slices.setValue(int(c.get("n_slices", 30)))
+
+        # 折线点
+        poly = data.get("polygon", [])
+        if poly:
+            self.tbl_poly.blockSignals(True)
+            self.tbl_poly.setRowCount(len(poly))
+            for r, (x, y) in enumerate(poly):
+                self.tbl_poly.setItem(r, 0, QTableWidgetItem(f"{float(x):.3f}"))
+                self.tbl_poly.setItem(r, 1, QTableWidgetItem(f"{float(y):.3f}"))
+            self.tbl_poly.blockSignals(False)
+
+        # 搜索包络
+        b = data.get("search_bounds", {}) or {}
+        for key, spin_min, spin_max in (
+            ("b1", self.spin_b1_min, self.spin_b1_max),
+            ("b2", self.spin_b2_min, self.spin_b2_max),
+            ("b3", self.spin_b3_min, self.spin_b3_max),
+        ):
+            pair = b.get(key, None)
+            if pair and len(pair) == 2:
+                spin_min.setValue(float(pair[0]))
+                spin_max.setValue(float(pair[1]))
+
+        # 算法与模型选择
+        if "search_algo" in data:
+            self.combo_algo.setCurrentIndex(int(data["search_algo"]))
+        if "search_eval" in data:
+            self.combo_eval.setCurrentIndex(int(data["search_eval"]))
+        if "solver_method" in data:
+            self.combo_solver.setCurrentIndex(int(data["solver_method"]))
+
+        # 让界面根据类型刷新一次
+        self._on_surface_type_changed(self.combo_surface_type.currentIndex())
 
     
 class ReliabilityDockWidget(QDockWidget):
@@ -812,3 +1316,29 @@ class ReliabilityDockWidget(QDockWidget):
         else:
             self.lbl_fs_range.setText("点估计法不提供极值样本")
             self.lbl_fail_counts.setText("解析点估计近似估算")
+            
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "rel_method": self.combo_rel_method.currentIndex(),
+            "eval_method": self.combo_eval_method.currentIndex(),
+            "n_samples": self.spin_n_sim.value(),
+            "cov_c": self.spin_cov_c.value(),
+            "dist_c": self.combo_dist_c.currentIndex(),
+            "cov_phi": self.spin_cov_phi.value(),
+            "dist_phi": self.combo_dist_phi.currentIndex(),
+            "rho": self.spin_rho.value(),
+            "cov_gamma": self.spin_cov_gamma.value(),
+        }
+
+    def from_dict(self, data: Dict[str, Any]):
+        if not isinstance(data, dict):
+            return
+        if "rel_method" in data:   self.combo_rel_method.setCurrentIndex(int(data["rel_method"]))
+        if "eval_method" in data:  self.combo_eval_method.setCurrentIndex(int(data["eval_method"]))
+        if "n_samples" in data:    self.spin_n_sim.setValue(int(data["n_samples"]))
+        if "cov_c" in data:        self.spin_cov_c.setValue(float(data["cov_c"]))
+        if "dist_c" in data:       self.combo_dist_c.setCurrentIndex(int(data["dist_c"]))
+        if "cov_phi" in data:      self.spin_cov_phi.setValue(float(data["cov_phi"]))
+        if "dist_phi" in data:     self.combo_dist_phi.setCurrentIndex(int(data["dist_phi"]))
+        if "rho" in data:          self.spin_rho.setValue(float(data["rho"]))
+        if "cov_gamma" in data:    self.spin_cov_gamma.setValue(float(data["cov_gamma"]))
