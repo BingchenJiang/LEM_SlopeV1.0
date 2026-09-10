@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QGroupBox, QDoubleSpinBox, QSpinBox, QComboBox, QPushButton,
     QLabel, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget,
-    QProgressBar, QCheckBox, QTreeWidget, QTreeWidgetItem, QSlider
+    QProgressBar, QCheckBox, QTreeWidget, QTreeWidgetItem, QSlider, QScrollArea, QFrame
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -17,6 +17,9 @@ from core.materials import SoilMaterial
 from core.rainfall import RainfallTimeSeries
 from core.slicing import Slice
 from gui.icons import get_icon
+
+
+
 
 
 class GeometryDockWidget(QDockWidget):
@@ -649,6 +652,7 @@ class ResultsDockWidget(QDockWidget):
             self.tbl_slices.setItem(r, 12, QTableWidgetItem(f"{np.degrees(s.phi):.1f}"))
             self.tbl_slices.setItem(r, 13, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
             self.tbl_slices.setItem(r, 14, QTableWidgetItem(f"{s.l:.2f}"))
+
     
 class ReliabilityDockWidget(QDockWidget):
     """边坡可靠度指标与失效概率评价停靠窗 (CAD/CAE 风格)"""

@@ -98,6 +98,7 @@ class MainWindow(QMainWindow):
         
         # 停靠在右侧，并与滑面寻优面板合并为 Tab 选项卡
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_rel)
+        self.tabifyDockWidget(self.dock_loads, self.dock_search)
         self.tabifyDockWidget(self.dock_search, self.dock_rel)
         
         self.resizeDocks([self.dock_geom, self.dock_loads], [320, 320], Qt.Horizontal)
