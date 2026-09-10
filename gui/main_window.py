@@ -9,6 +9,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QAction, QToolBar
 )
 from PyQt5.QtCore import Qt
+from core.reliability.monte_carlo import MonteCarloSimulator
 import numpy as np
 
 from core.geometry import SlopeGeometry
@@ -19,13 +20,13 @@ from core.solvers import (
 )
 from core.dxf_io import export_model_dxf, import_dxf_polyline
 from core.project_io import save_project_file, load_project_file
-from core.threads import OptimizationWorker
+from core.threads import OptimizationWorker, ReliabilityWorker
 from gui.canvas_qt import SlopeGraphicsView
 from gui.icons import get_icon
 from gui.dock_widgets import (
     GeometryDockWidget, MaterialDockWidget,
     RainfallDockWidget, LoadsDockWidget,
-    SearchDockWidget, ResultsDockWidget
+    SearchDockWidget, ResultsDockWidget, ReliabilityDockWidget
 )
 
 
@@ -90,6 +91,18 @@ class MainWindow(QMainWindow):
         self.dock_search.search_stop_requested.connect(self.on_search_stop_requested)
         self.dock_search.apply_searched_circle.connect(self.on_apply_searched_circle)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_search)
+        
+        self.dock_rel = ReliabilityDockWidget(self)
+        self.dock_rel.reliability_requested.connect(self.on_reliability_requested)
+        self.dock_rel.reliability_stop_requested.connect(self.on_reliability_stop_requested)
+        
+        # 停靠在右侧，并与滑面寻优面板合并为 Tab 选项卡
+        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_rel)
+        self.tabifyDockWidget(self.dock_search, self.dock_rel)
+        
+        self.resizeDocks([self.dock_geom, self.dock_loads], [320, 320], Qt.Horizontal)
+        self.resizeDocks([self.dock_rain], [200], Qt.Vertical)
+        
 
     def _init_menu_and_toolbars(self):
         menu_bar = self.menuBar()
@@ -358,6 +371,100 @@ class MainWindow(QMainWindow):
         if self._search_worker and self._search_worker.isRunning():
             self._search_worker.stop()
             self.status_bar.showMessage("正在终止后台寻优任务...")
+
+    # ================= 边坡可靠度与失效概率评价逻辑 =================
+    def on_reliability_requested(self):
+        """响应'启动失效概率评价'"""
+        self.on_params_changed()
+        if not self.current_slices or not self.slice_info:
+            QMessageBox.warning(self, "几何异常", "请先设置并确保滑面在边坡内部切出有效滑动体。")
+            return
+
+        cfg = self.dock_rel.get_config()
+        ground_pts = self.dock_geom.get_ground_points()
+        water_pts = self.dock_geom.get_water_points()
+        strata_lines = self.dock_geom.get_strata_lines()
+        materials = self.dock_mat.get_materials_list()
+        surcharge = self.dock_loads.get_surcharge_loads()
+        kh = self.dock_loads.get_seismic_kh()
+        rain_depth = self.dock_rain.get_current_wetting_front_depth()
+        xc, yc, R, _ = self.dock_search.get_circle_params()
+
+        geom = SlopeGeometry(ground_pts, water_pts, strata_lines, surcharge)
+
+        # 1. 点估计法 (PEM) 快速瞬时计算
+        if cfg["method"] == "PEM":
+            res = run_point_estimate_analysis(
+                geom=geom,
+                materials=materials,
+                xc=xc, yc=yc, R=R,
+                cov_c=cfg["cov_c"],
+                cov_phi=cfg["cov_phi"],
+                rho_c_phi=cfg["rho"],
+                rainfall_depth=rain_depth,
+                kh=kh
+            )
+            if res.get("success", False):
+                self.dock_rel.display_results(res)
+                self.status_bar.showMessage(f"点估计法计算完成: Pf = {res['pf_percent']:.2f}%, β = {res['beta']:.2f}")
+            else:
+                QMessageBox.warning(self, "计算失败", res.get("error", "点估计法计算未成功。"))
+
+        # 2. 蒙特卡洛模拟法 (MCS) 异步多线程执行
+        else:
+            sim = MonteCarloSimulator(
+                geom=geom,
+                materials=materials,
+                xc=xc, yc=yc, R=R,
+                n_samples=cfg["n_samples"],
+                eval_method=cfg["eval_method"],
+                rainfall_depth=rain_depth,
+                kh=kh,
+                cov_c=cfg["cov_c"],
+                dist_c=cfg["dist_c"],
+                cov_phi=cfg["cov_phi"],
+                dist_phi=cfg["dist_phi"],
+                rho_c_phi=cfg["rho"],
+                cov_gamma=cfg["cov_gamma"]
+            )
+
+            self.dock_rel.btn_run_rel.setEnabled(False)
+            self.dock_rel.btn_stop_rel.setEnabled(True)
+            self.dock_rel.prog_bar.setValue(0)
+            self.status_bar.showMessage(f"正在执行蒙特卡洛抽样模拟 ({cfg['n_samples']} 次)...")
+
+            self._reliability_worker = ReliabilityWorker(sim, parent=self)
+            self._reliability_worker.progress_updated.connect(self._on_rel_progress)
+            self._reliability_worker.reliability_finished.connect(self._on_rel_finished)
+            self._reliability_worker.reliability_failed.connect(self._on_rel_failed)
+            self._reliability_worker.start()
+
+    def on_reliability_stop_requested(self):
+        """响应用户点击'终止评价'"""
+        if hasattr(self, "_reliability_worker") and self._reliability_worker and self._reliability_worker.isRunning():
+            self._reliability_worker.stop()
+            self.status_bar.showMessage("正在终止可靠度抽样计算...")
+
+    def _on_rel_progress(self, current: int, total: int, current_pf: float):
+        """后台抽样进度实时更新"""
+        pct = int(current / max(1, total) * 100)
+        self.dock_rel.prog_bar.setValue(min(100, pct))
+        self.dock_rel.lbl_pf.setText(f"{current_pf:.2f}% (抽样中...)")
+
+    def _on_rel_finished(self, res: dict):
+        """模拟计算正常完成"""
+        self.dock_rel.btn_run_rel.setEnabled(True)
+        self.dock_rel.btn_stop_rel.setEnabled(False)
+        self.dock_rel.prog_bar.setValue(100)
+        self.dock_rel.display_results(res)
+        self.status_bar.showMessage(f"蒙特卡洛评价完成: Pf = {res['pf_percent']:.2f}%, β = {res['beta']:.3f}")
+
+    def _on_rel_failed(self, err_msg: str):
+        """模拟失败或用户主动终止"""
+        self.dock_rel.btn_run_rel.setEnabled(True)
+        self.dock_rel.btn_stop_rel.setEnabled(False)
+        self.status_bar.showMessage(err_msg)
+        QMessageBox.information(self, "可靠度评价提示", err_msg)
 
     def _on_search_progress(self, current: int, total: int, current_best: float):
         pct = int(current / max(1, total) * 100)

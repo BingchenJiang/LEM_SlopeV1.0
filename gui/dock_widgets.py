@@ -649,3 +649,162 @@ class ResultsDockWidget(QDockWidget):
             self.tbl_slices.setItem(r, 12, QTableWidgetItem(f"{np.degrees(s.phi):.1f}"))
             self.tbl_slices.setItem(r, 13, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
             self.tbl_slices.setItem(r, 14, QTableWidgetItem(f"{s.l:.2f}"))
+    
+class ReliabilityDockWidget(QDockWidget):
+    """边坡可靠度指标与失效概率评价停靠窗 (CAD/CAE 风格)"""
+    reliability_requested = pyqtSignal()
+    reliability_stop_requested = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__("边坡可靠度与失效概率评价", parent)
+        self.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea | Qt.BottomDockWidgetArea)
+        self._init_ui()
+
+    def _init_ui(self):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        # 1. 评价算法与抽样规模设置
+        grp_method = QGroupBox("可靠度评价算法与抽样规模")
+        f_method = QFormLayout()
+
+        self.combo_rel_method = QComboBox()
+        self.combo_rel_method.addItems([
+            "蒙特卡洛模拟法 (MCS, 随机抽样)",
+            "Rosenblueth 点估计法 (PEM, 快速核算)"
+        ])
+
+        self.combo_eval_method = QComboBox()
+        self.combo_eval_method.addItems(["Simplified Bishop (推荐)", "Fellenius / Ordinary"])
+
+        self.spin_n_sim = QSpinBox()
+        self.spin_n_sim.setRange(100, 200000)
+        self.spin_n_sim.setValue(5000)
+        self.spin_n_sim.setSingleStep(1000)
+        self.spin_n_sim.setSuffix(" 次")
+
+        f_method.addRow("可靠度算法:", self.combo_rel_method)
+        f_method.addRow("基础条分模型:", self.combo_eval_method)
+        f_method.addRow("MCS 抽样次数:", self.spin_n_sim)
+        grp_method.setLayout(f_method)
+        layout.addWidget(grp_method)
+
+        # 2. 岩土力学参数概率统计特征
+        grp_stats = QGroupBox("岩土力学参数概率统计特征")
+        f_stats = QFormLayout()
+
+        self.spin_cov_c = QDoubleSpinBox()
+        self.spin_cov_c.setRange(0.01, 1.0)
+        self.spin_cov_c.setValue(0.25)
+        self.spin_cov_c.setSingleStep(0.05)
+
+        self.combo_dist_c = QComboBox()
+        self.combo_dist_c.addItems(["对数正态分布", "正态分布"])
+
+        self.spin_cov_phi = QDoubleSpinBox()
+        self.spin_cov_phi.setRange(0.01, 1.0)
+        self.spin_cov_phi.setValue(0.15)
+        self.spin_cov_phi.setSingleStep(0.05)
+
+        self.combo_dist_phi = QComboBox()
+        self.combo_dist_phi.addItems(["对数正态分布", "正态分布"])
+
+        self.spin_rho = QDoubleSpinBox()
+        self.spin_rho.setRange(-0.95, 0.95)
+        self.spin_rho.setValue(-0.50)
+        self.spin_rho.setSingleStep(0.05)
+
+        self.spin_cov_gamma = QDoubleSpinBox()
+        self.spin_cov_gamma.setRange(0.01, 0.5)
+        self.spin_cov_gamma.setValue(0.08)
+        self.spin_cov_gamma.setSingleStep(0.02)
+
+        f_stats.addRow("黏聚力 c' 变异系数 (COV):", self.spin_cov_c)
+        f_stats.addRow("黏聚力 c' 概率分布:", self.combo_dist_c)
+        f_stats.addRow("摩擦角 φ' 变异系数 (COV):", self.spin_cov_phi)
+        f_stats.addRow("摩擦角 φ' 概率分布:", self.combo_dist_phi)
+        f_stats.addRow("c'-φ' 互相关系数 (ρ):", self.spin_rho)
+        f_stats.addRow("天然重度 γ 变异系数 (COV):", self.spin_cov_gamma)
+        grp_stats.setLayout(f_stats)
+        layout.addWidget(grp_stats)
+
+        # 3. 运行控制与实时进度条
+        h_btn = QHBoxLayout()
+        self.btn_run_rel = QPushButton("启动失效概率评价")
+        ico_run = get_icon("run_solvers")
+        if ico_run:
+            self.btn_run_rel.setIcon(ico_run)
+        self.btn_run_rel.setStyleSheet("background-color: #2980b9; color: white; font-weight: bold; padding: 6px;")
+        self.btn_run_rel.clicked.connect(self.reliability_requested.emit)
+
+        self.btn_stop_rel = QPushButton("终止评价")
+        ico_stop = get_icon("stop_search")
+        if ico_stop:
+            self.btn_stop_rel.setIcon(ico_stop)
+        self.btn_stop_rel.setEnabled(False)
+        self.btn_stop_rel.setStyleSheet("padding: 6px;")
+        self.btn_stop_rel.clicked.connect(self.reliability_stop_requested.emit)
+
+        h_btn.addWidget(self.btn_run_rel)
+        h_btn.addWidget(self.btn_stop_rel)
+        layout.addLayout(h_btn)
+
+        self.prog_bar = QProgressBar()
+        self.prog_bar.setValue(0)
+        layout.addWidget(self.prog_bar)
+
+        # 4. 评价成果数据展示卡片
+        grp_res = QGroupBox("边坡可靠度与风险成果指标")
+        f_res = QFormLayout()
+
+        self.lbl_pf = QLabel("未分析")
+        self.lbl_pf.setStyleSheet("font-size: 15px; font-weight: bold; color: #c0392b;")
+        self.lbl_beta = QLabel("未分析")
+        self.lbl_beta.setStyleSheet("font-size: 15px; font-weight: bold; color: #2980b9;")
+        self.lbl_fs_mean_std = QLabel("未分析")
+        self.lbl_fs_range = QLabel("未分析")
+        self.lbl_fail_counts = QLabel("未分析")
+
+        f_res.addRow("失稳破坏概率 (Pf):", self.lbl_pf)
+        f_res.addRow("可靠度指标 (β):", self.lbl_beta)
+        f_res.addRow("安全系数均值与标准差:", self.lbl_fs_mean_std)
+        f_res.addRow("抽样极值范围 [Min, Max]:", self.lbl_fs_range)
+        f_res.addRow("失效破坏样本统计:", self.lbl_fail_counts)
+        grp_res.setLayout(f_res)
+        layout.addWidget(grp_res)
+
+        layout.addStretch()
+        self.setWidget(container)
+
+    def get_config(self) -> Dict[str, Any]:
+        """提取界面控件参数供后端求解器使用"""
+        return {
+            "method": "MCS" if "蒙特卡洛" in self.combo_rel_method.currentText() else "PEM",
+            "eval_method": "Bishop" if "Bishop" in self.combo_eval_method.currentText() else "Fellenius",
+            "n_samples": self.spin_n_sim.value(),
+            "cov_c": self.spin_cov_c.value(),
+            "dist_c": self.combo_dist_c.currentText(),
+            "cov_phi": self.spin_cov_phi.value(),
+            "dist_phi": self.combo_dist_phi.currentText(),
+            "rho": self.spin_rho.value(),
+            "cov_gamma": self.spin_cov_gamma.value()
+        }
+
+    def display_results(self, res: Dict[str, Any]):
+        """渲染呈现计算成果"""
+        pf_pct = res.get("pf_percent", 0.0)
+        beta = res.get("beta", 0.0)
+        mean_fs = res.get("fs_mean", 0.0)
+        std_fs = res.get("fs_std", 0.0)
+        cov_fs = res.get("fs_cov", 0.0)
+
+        self.lbl_pf.setText(f"{pf_pct:.2f}% (P_f = {res.get('pf', 0.0):.4e})")
+        self.lbl_beta.setText(f"β = {beta:.3f}")
+        self.lbl_fs_mean_std.setText(f"μ = {mean_fs:.3f}, σ = {std_fs:.3f} (COV={cov_fs:.2f})")
+
+        if "fs_min" in res:
+            self.lbl_fs_range.setText(f"[{res['fs_min']:.3f}, {res['fs_max']:.3f}]")
+            self.lbl_fail_counts.setText(f"{res['failure_count']} 次失效 / {res['n_valid']} 次有效抽样")
+        else:
+            self.lbl_fs_range.setText("点估计法不提供极值样本")
+            self.lbl_fail_counts.setText("解析点估计近似估算")

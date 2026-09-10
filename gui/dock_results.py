@@ -73,3 +73,5 @@ class ResultsDockWidget(QWidget):
             self.tbl_slices.setItem(r, 5, QTableWidgetItem(f"{np.degrees(s.alpha):.2f}"))
             self.tbl_slices.setItem(r, 6, QTableWidgetItem(f"{s.u:.2f}"))
             self.tbl_slices.setItem(r, 7, QTableWidgetItem(f"{s.l:.2f}"))
+            
+            

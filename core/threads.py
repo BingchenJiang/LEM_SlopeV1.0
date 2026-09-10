@@ -77,3 +77,42 @@ class OptimizationWorker(QThread):
                 self.search_failed.emit("用户已主动终止搜索计算。")
         except Exception as e:
             self.search_failed.emit(f"寻优计算发生异常: {str(e)}")
+            
+
+class ReliabilityWorker(QThread):
+    """边坡可靠度与失效概率评估后台异步工作线程"""
+    progress_updated = pyqtSignal(int, int, float)  # current, total, current_pf
+    reliability_finished = pyqtSignal(dict)         # 结果字典
+    reliability_failed = pyqtSignal(str)            # 错误信息
+
+    def __init__(self, simulator, parent=None):
+        super().__init__(parent)
+        self.simulator = simulator
+        self._is_interrupted = False
+
+    def stop(self):
+        """用户点击终止评价"""
+        self._is_interrupted = True
+
+    def run(self):
+        try:
+            def callback_fn(current, total, current_pf):
+                if not self._is_interrupted:
+                    self.progress_updated.emit(current, total, current_pf)
+
+            def is_interrupted():
+                return self._is_interrupted
+
+            res = self.simulator.run(
+                progress_callback=callback_fn,
+                is_interrupted_fn=is_interrupted
+            )
+
+            if self._is_interrupted:
+                self.reliability_failed.emit("用户已主动终止蒙特卡洛抽样计算。")
+            elif not res.get("success", False):
+                self.reliability_failed.emit(res.get("error", "抽样计算未收敛。"))
+            else:
+                self.reliability_finished.emit(res)
+        except Exception as e:
+            self.reliability_failed.emit(f"可靠度计算发生异常: {str(e)}")

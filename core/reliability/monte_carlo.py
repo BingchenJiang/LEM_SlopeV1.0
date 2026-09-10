@@ -1,0 +1,169 @@
+# -*- coding: utf-8 -*-
+"""
+蒙特卡洛模拟法 (MCS) 边坡失效概率与可靠度指标求解器
+"""
+from typing import List, Dict, Any, Optional, Callable
+import numpy as np
+from scipy.stats import norm
+
+from core.geometry import SlopeGeometry
+from core.materials import SoilMaterial
+from core.slicing import create_slices
+from core.solvers.bishop import BishopSolver
+from core.solvers.fellenius import FelleniusSolver
+from core.reliability.sampler import sample_soil_parameters
+
+
+class MonteCarloSimulator:
+    def __init__(
+        self,
+        geom: SlopeGeometry,
+        materials: List[SoilMaterial],
+        xc: float,
+        yc: float,
+        R: float,
+        n_samples: int = 5000,
+        eval_method: str = "Bishop",
+        rainfall_depth: float = 0.0,
+        kh: float = 0.0,
+        n_slices: int = 25,
+        cov_c: float = 0.25,
+        dist_c: str = "对数正态分布",
+        cov_phi: float = 0.15,
+        dist_phi: str = "对数正态分布",
+        rho_c_phi: float = -0.50,
+        cov_gamma: float = 0.08
+    ):
+        self.geom = geom
+        self.materials = materials
+        self.xc = xc
+        self.yc = yc
+        self.R = R
+        self.n_samples = max(100, int(n_samples))
+        self.eval_method = eval_method
+        self.rainfall_depth = rainfall_depth
+        self.kh = kh
+        self.n_slices = n_slices
+        self.cov_c = cov_c
+        self.dist_c = dist_c
+        self.cov_phi = cov_phi
+        self.dist_phi = dist_phi
+        self.rho_c_phi = rho_c_phi
+        self.cov_gamma = cov_gamma
+
+    def run(
+        self,
+        progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        is_interrupted_fn: Optional[Callable[[], bool]] = None
+    ) -> Dict[str, Any]:
+        # 1. 对指定滑弧仅进行一次基准切片
+        base_slices, info, err_msg = create_slices(
+            geom=self.geom,
+            materials=self.materials,
+            xc=self.xc,
+            yc=self.yc,
+            R=self.R,
+            n_slices=self.n_slices,
+            rainfall_depth=self.rainfall_depth,
+            kh=self.kh
+        )
+        if not base_slices or not info:
+            return {"success": False, "error": err_msg or "滑弧未切出有效滑体"}
+
+        x_edges = info[2]
+
+        # 2. 为各土层生成独立抽样序列 (避免多层土参数混同)
+        layer_samples = []
+        for mat in self.materials:
+            s_dict = sample_soil_parameters(
+                n_samples=self.n_samples,
+                mean_c=mat.c_prime,
+                cov_c=self.cov_c,
+                dist_c=self.dist_c,
+                mean_phi=mat.phi_deg,
+                cov_phi=self.cov_phi,
+                dist_phi=self.dist_phi,
+                rho_c_phi=self.rho_c_phi,
+                mean_gamma=mat.gamma_dry,
+                cov_gamma=self.cov_gamma
+            )
+            layer_samples.append(s_dict)
+
+        # 3. 循环抽样与稳定性试算
+        fs_records = []
+        failure_count = 0
+        batch_report = max(50, self.n_samples // 50)
+
+        for i in range(self.n_samples):
+            if is_interrupted_fn and is_interrupted_fn():
+                return {"success": False, "error": "计算被用户中断"}
+
+            # 针对每个土条，根据所属土层赋予随机参数
+            for s in base_slices:
+                layer_idx = 0
+                for m_idx, m in enumerate(self.materials):
+                    if m.name == s.layer_name:
+                        layer_idx = m_idx
+                        break
+                samples = layer_samples[layer_idx]
+                s.c = float(samples["c"][i])
+                s.phi = float(np.radians(samples["phi_deg"][i]))
+                weight_ratio = float(samples["gamma"][i] / max(1.0, self.materials[layer_idx].gamma_dry))
+                s.W = s.W_soil * weight_ratio + s.q_load
+                s.Fh = s.kh * (s.W_soil * weight_ratio)
+
+            # 调用极限平衡求解器
+            if "Fellenius" in self.eval_method:
+                solver = FelleniusSolver(base_slices, self.xc, self.yc, self.R, self.geom, x_edges)
+            else:
+                solver = BishopSolver(base_slices, self.xc, self.yc, self.R, self.geom, x_edges, tol=1e-3, max_iter=25)
+
+            fs, _ = solver.solve()
+            if fs is not None and fs > 0.01:
+                fs_records.append(fs)
+                if fs < 1.0:
+                    failure_count += 1
+
+            # 阶段性回调进度
+            if progress_callback and (i + 1) % batch_report == 0:
+                cur_pf = (failure_count / max(1, len(fs_records))) * 100.0
+                progress_callback(i + 1, self.n_samples, cur_pf)
+
+        if len(fs_records) < 10:
+            return {"success": False, "error": "有效收敛样本数过低"}
+
+        # 4. 统计分析指标汇总
+        fs_arr = np.array(fs_records, dtype=float)
+        n_valid = len(fs_arr)
+        pf = failure_count / n_valid
+        pf_pct = pf * 100.0
+
+        mean_fs = float(np.mean(fs_arr))
+        std_fs = float(np.std(fs_arr))
+        cov_fs = float(std_fs / max(1e-4, mean_fs))
+
+        if pf <= 0.0:
+            beta = float((mean_fs - 1.0) / max(1e-4, std_fs))
+        elif pf >= 1.0:
+            beta = -3.0
+        else:
+            beta = float(-norm.ppf(pf))
+
+        counts, bin_edges = np.histogram(fs_arr, bins=25)
+
+        return {
+            "success": True,
+            "n_samples": self.n_samples,
+            "n_valid": n_valid,
+            "failure_count": failure_count,
+            "pf": float(pf),
+            "pf_percent": float(pf_pct),
+            "beta": float(beta),
+            "fs_mean": mean_fs,
+            "fs_std": std_fs,
+            "fs_cov": cov_fs,
+            "fs_min": float(np.min(fs_arr)),
+            "fs_max": float(np.max(fs_arr)),
+            "hist_counts": counts.tolist(),
+            "hist_bins": bin_edges.tolist()
+        }
