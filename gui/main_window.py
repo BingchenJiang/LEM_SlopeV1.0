@@ -76,7 +76,9 @@ class MainWindow(QMainWindow):
 
         self.dock_loads = LoadsDockWidget(self)
         self.dock_loads.loads_changed.connect(self.on_params_changed)
-
+        
+        
+        
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_geom)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_mat)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_loads)
@@ -94,7 +96,11 @@ class MainWindow(QMainWindow):
         self.dock_search.calculate_requested.connect(self.on_calculate_requested)
         self.dock_search.search_requested.connect(self.on_search_requested)
         self.dock_search.search_stop_requested.connect(self.on_search_stop_requested)
-        self.dock_search.apply_searched_circle.connect(self.on_apply_searched_circle)
+        # self.dock_search.apply_searched_circle.connect(self.on_apply_searched_circle)
+        self.dock_search.combo_solver.currentIndexChanged.connect(
+                    lambda _: self._sync_reliability_inherit_label()
+                )
+        
 
         self.dock_rel = ReliabilityDockWidget(self)
         self.dock_rel.reliability_requested.connect(self.on_reliability_requested)
@@ -254,6 +260,12 @@ class MainWindow(QMainWindow):
         cad_toolbar.addAction(act_export_dxf)
         self.addToolBar(Qt.TopToolBarArea, cad_toolbar)
 
+    def _sync_reliability_inherit_label(self):
+        text = self.dock_search.get_selected_method_name()
+        short = text.split()[0] if text else "—"
+        self.dock_rel.lbl_inherit_model.setText(f"继承自滑面面板: {short}")
+
+
     def showEvent(self, event):
         super().showEvent(event)
         if not self._initial_fit_done:
@@ -361,25 +373,19 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(f"降雨全历时 (0 ~ {max_t:.1f} h) 稳定性时程分析完成，已生成衰减表。")
 
     def on_calculate_requested(self):
-        """仅对用户当前选定的滑面，计算用户选定的力学模型"""
+        """对当前滑面，用所有适用的 LEM 模型批量计算，填充对照表"""
         self.on_params_changed()
         if not self.current_slices or not self.slice_info:
             QMessageBox.warning(self, "几何异常",
                                 "当前滑面未能在土体内部切出有效滑体，请调整几何输入。")
             return
 
-        method_text = self.dock_search.get_selected_method_name()
         x_edges = self.slice_info[2]
         slip_surface = self.dock_search.get_slip_surface()
+        stype = slip_surface.surface_type
 
-        # ============================================================
-        # 【P1-2 修复】从 slip_surface 派生 xc / yc / R
-        # ------------------------------------------------------------
-        # 圆弧模式: 直接从滑面对象取圆心与半径
-        # 非圆弧模式: 用折线几何中心做力矩参考点, 用土条底到中心的
-        #             最大距离做等效半径 R (只要非零, 力矩方程就能成立)
-        # ============================================================
-        if slip_surface.surface_type == "circular":
+        # ---------- 从滑面对象派生力矩中心 / 等效半径 ----------
+        if stype == "circular":
             xc_ = slip_surface.xc
             yc_ = slip_surface.yc
             R_ = slip_surface.R
@@ -389,54 +395,49 @@ class MainWindow(QMainWindow):
                 float(np.hypot(s.xm - xc_, s.y_base - yc_))
                 for s in self.current_slices
             )
-            R_ = max(1.0, R_)  # 保证非零
+            R_ = max(1.0, R_)
 
-        # 实例化所选求解器（统一传 xc_, yc_, R_）
-        solver = None
-        if "Spencer" in method_text:
-            solver = SpencerSolver(
-                self.current_slices, xc_, yc_, R_,
-                self.current_geom, x_edges,
-                slip_surface=slip_surface
-            )
-        elif "Morgenstern" in method_text:
-            solver = MorgensternPriceSolver(
-                self.current_slices, xc_, yc_, R_,
-                self.current_geom, x_edges,
-                slip_surface=slip_surface
-            )
-        elif "Janbu" in method_text:
-            solver = JanbuSolver(
-                self.current_slices, xc_, yc_, R_,
-                self.current_geom, x_edges,
-                slip_surface=slip_surface
-            )
-        elif "Bishop" in method_text:
-            solver = BishopSolver(
-                self.current_slices, xc_, yc_, R_,
-                self.current_geom, x_edges,
-                slip_surface=slip_surface
-            )
-        elif "Fellenius" in method_text:
-            solver = FelleniusSolver(
-                self.current_slices, xc_, yc_, R_,
-                self.current_geom, x_edges,
-                slip_surface=slip_surface
-            )
+        # ---------- 所有经典模型 ----------
+        model_classes = [
+            ("Fellenius (瑞典条分法)", FelleniusSolver),
+            ("Bishop (简化毕肖普)", BishopSolver),
+            ("Janbu (简化让布)", JanbuSolver),
+            ("Spencer (斯宾塞)", SpencerSolver),
+            ("Morgenstern-Price (M-P)", MorgensternPriceSolver),
+        ]
 
-        if solver is None:
-            return
+        results = []
+        for name, cls in model_classes:
+            # 非圆弧模式下，跳过不支持非圆弧的模型
+            if stype == "polygonal" and not getattr(cls, "supports_non_circular", False):
+                continue
 
-        # 单模型定向求解
-        fs, note = solver.solve()
-        self.dock_results.display_summary([(method_text.split()[0], (fs, note))])
+            try:
+                solver = cls(
+                    self.current_slices,
+                    xc_, yc_, R_,
+                    self.current_geom,
+                    x_edges,
+                    slip_surface=slip_surface,
+                )
+                fs, note = solver.solve()
+            except Exception as e:
+                fs, note = None, f"计算异常: {e}"
 
-        if fs is not None:
+            results.append((name, (fs, note)))
+
+        # ---------- 填充对照表 ----------
+        self.dock_results.display_summary(results)
+
+        # ---------- 状态栏汇总 ----------
+        valid = [(n, fs) for n, (fs, _) in results if fs is not None]
+        if valid:
+            summary = " | ".join(f"{n.split()[0]}={fs:.3f}" for n, fs in valid)
             self.status_bar.showMessage(
-                f"计算完成: {method_text.split()[0]} Fs = {fs:.4f} ({note})"
+                f"完成 {len(valid)}/{len(results)} 个模型: {summary}"
             )
         else:
-            self.status_bar.showMessage(f"计算未收敛: {note}")
+            self.status_bar.showMessage("所有模型均未收敛，请检查输入参数。")
 
     def on_search_requested(self):
         """启动滑面全局寻优 (支持圆弧与非圆弧, 非圆弧支持自动/手动两种模式)"""
@@ -613,14 +614,51 @@ class MainWindow(QMainWindow):
             self._search_worker.stop()
             self.status_bar.showMessage("正在终止后台寻优任务...")
 
-    # ================= 边坡可靠度与失效概率评价逻辑 =================
+    # ---------------- 求解器名 → 求解器类 ----------------
+    @staticmethod
+    def _method_text_to_solver_class(method_text: str):
+        """从搜索面板的模型名字解析出求解器类"""
+        from core.solvers import (
+            FelleniusSolver, BishopSolver, JanbuSolver,
+            SpencerSolver, MorgensternPriceSolver,
+        )
+        if "Spencer" in method_text:
+            return SpencerSolver
+        if "Morgenstern" in method_text:
+            return MorgensternPriceSolver
+        if "Janbu" in method_text:
+            return JanbuSolver
+        if "Bishop" in method_text:
+            return BishopSolver
+        if "Fellenius" in method_text:
+            return FelleniusSolver
+        return BishopSolver
+
     def on_reliability_requested(self):
-        """响应'启动失效概率评价'"""
+        """启动失效概率评价 (继承当前滑面 + 当前求解器模型)"""
         self.on_params_changed()
         if not self.current_slices or not self.slice_info:
-            QMessageBox.warning(self, "几何异常", "请先设置并确保滑面在边坡内部切出有效滑动体。")
+            QMessageBox.warning(self, "几何异常",
+                                "请先设置并确保滑面在边坡内部切出有效滑动体。")
             return
 
+        # ---------- 从搜索面板继承滑面与模型 ----------
+        slip_surface = self.dock_search.get_slip_surface()
+        method_text = self.dock_search.get_selected_method_name()
+        solver_class = self._method_text_to_solver_class(method_text)
+
+        # 非圆弧 + 仅圆弧模型 → 自动回退到 Janbu
+        stype = slip_surface.surface_type
+        if stype == "polygonal" and not getattr(solver_class, "supports_non_circular", False):
+            from core.solvers import JanbuSolver
+            solver_class = JanbuSolver
+            QMessageBox.information(
+                self, "模型自动切换",
+                f"当前滑面为非圆弧，所选模型 {method_text} 不支持非圆弧。\n"
+                f"已自动切换到 Simplified Janbu 进行可靠度评价。"
+            )
+
+        # ---------- 构造几何 ----------
         cfg = self.dock_rel.get_config()
         ground_pts = self.dock_geom.get_ground_points()
         water_pts = self.dock_geom.get_water_points()
@@ -629,36 +667,40 @@ class MainWindow(QMainWindow):
         surcharge = self.dock_loads.get_surcharge_loads()
         kh = self.dock_loads.get_seismic_kh()
         rain_depth = self.dock_rain.get_current_wetting_front_depth()
-        xc, yc, R, _ = self.dock_search.get_circle_params()
 
         geom = SlopeGeometry(ground_pts, water_pts, strata_lines, surcharge)
 
-        # 1. 点估计法 (PEM) 快速瞬时计算
+        # ---------- 1. PEM ----------
         if cfg["method"] == "PEM":
             res = run_point_estimate_analysis(
                 geom=geom,
                 materials=materials,
-                xc=xc, yc=yc, R=R,
+                slip_surface=slip_surface,
+                solver_class=solver_class,
                 cov_c=cfg["cov_c"],
                 cov_phi=cfg["cov_phi"],
                 rho_c_phi=cfg["rho"],
                 rainfall_depth=rain_depth,
-                kh=kh
+                kh=kh,
             )
             if res.get("success", False):
                 self.dock_rel.display_results(res)
-                self.status_bar.showMessage(f"点估计法计算完成: Pf = {res['pf_percent']:.2f}%, β = {res['beta']:.2f}")
+                self.status_bar.showMessage(
+                    f"点估计法完成: Pf = {res['pf_percent']:.2f}%, "
+                    f"β = {res['beta']:.2f}"
+                )
             else:
-                QMessageBox.warning(self, "计算失败", res.get("error", "点估计法计算未成功。"))
+                QMessageBox.warning(self, "计算失败",
+                                    res.get("error", "点估计法未成功。"))
 
-        # 2. 蒙特卡洛模拟法 (MCS) 异步多线程执行
+        # ---------- 2. MCS ----------
         else:
             sim = MonteCarloSimulator(
                 geom=geom,
                 materials=materials,
-                xc=xc, yc=yc, R=R,
+                slip_surface=slip_surface,       # ★ 传滑面对象
+                solver_class=solver_class,        # ★ 传求解器类
                 n_samples=cfg["n_samples"],
-                eval_method=cfg["eval_method"],
                 rainfall_depth=rain_depth,
                 kh=kh,
                 cov_c=cfg["cov_c"],
@@ -666,13 +708,19 @@ class MainWindow(QMainWindow):
                 cov_phi=cfg["cov_phi"],
                 dist_phi=cfg["dist_phi"],
                 rho_c_phi=cfg["rho"],
-                cov_gamma=cfg["cov_gamma"]
+                cov_gamma=cfg["cov_gamma"],
             )
 
             self.dock_rel.btn_run_rel.setEnabled(False)
             self.dock_rel.btn_stop_rel.setEnabled(True)
             self.dock_rel.prog_bar.setValue(0)
-            self.status_bar.showMessage(f"正在执行蒙特卡洛抽样模拟 ({cfg['n_samples']} 次)...")
+
+            stype_cn = "圆弧" if stype == "circular" else "非圆弧"
+            solver_short = method_text.split()[0]
+            self.status_bar.showMessage(
+                f"正在执行蒙特卡洛抽样 ({cfg['n_samples']} 次, "
+                f"{stype_cn}滑面, 模型: {solver_short})..."
+            )
 
             self._reliability_worker = ReliabilityWorker(sim, parent=self)
             self._reliability_worker.progress_updated.connect(self._on_rel_progress)
@@ -719,7 +767,7 @@ class MainWindow(QMainWindow):
         self.status_bar.showMessage(err_msg)
         QMessageBox.information(self, "搜索提示", err_msg)
 
-    def on_apply_searched_circle(self):
+    # def on_apply_searched_circle(self):
         if self.searched_best_params is None:
             QMessageBox.information(self, "提示", "请先启动搜索获得最危险滑面。")
             return

@@ -585,7 +585,7 @@ class SearchDockWidget(QDockWidget):
     calculate_requested = pyqtSignal()
     search_requested = pyqtSignal()
     search_stop_requested = pyqtSignal()
-    apply_searched_circle = pyqtSignal()
+    # apply_searched_circle = pyqtSignal()
     preview_circle_changed = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -751,10 +751,10 @@ class SearchDockWidget(QDockWidget):
         self.lbl_best.setStyleSheet("font-weight: bold; color: #c0392b; font-size: 13px;")
         layout.addWidget(self.lbl_best)
 
-        self.btn_apply = QPushButton("应用最危险滑面至模型")
-        self.btn_apply.setIcon(get_icon("apply_surface"))
-        self.btn_apply.clicked.connect(self.apply_searched_circle.emit)
-        layout.addWidget(self.btn_apply)
+        # self.btn_apply = QPushButton("应用最危险滑面至模型")
+        # self.btn_apply.setIcon(get_icon("apply_surface"))
+        # self.btn_apply.clicked.connect(self.apply_searched_circle.emit)
+        # layout.addWidget(self.btn_apply)
 
         # ---------- 8. 定向执行分析主按钮 ----------
         self.btn_run_all = QPushButton("执行稳定性分析 (所选模型)")
@@ -1033,9 +1033,15 @@ class ResultsDockWidget(QDockWidget):
 
         self.setWidget(self.tabs)
 
-    def display_summary(self, results: List[Tuple[str, Tuple[Optional[float], str]]]):
-        self.tbl_summary.setRowCount(len(results))
-        for r, (name, (fs, note)) in enumerate(results):
+    def display_summary(self, results):
+        # 按 FS 升序排 (最危险的在最上面; None 排最后)
+        sorted_results = sorted(
+            results,
+            key=lambda kv: (kv[1][0] is None,
+                            kv[1][0] if kv[1][0] is not None else 999)
+        )
+        self.tbl_summary.setRowCount(len(sorted_results))
+        for r, (name, (fs, note)) in enumerate(sorted_results):
             self.tbl_summary.setItem(r, 0, QTableWidgetItem(name))
             fs_text = f"{fs:.4f}" if fs is not None else "未收敛"
             item_fs = QTableWidgetItem(fs_text)
@@ -1181,18 +1187,27 @@ class ReliabilityDockWidget(QDockWidget):
             "蒙特卡洛模拟法 (MCS, 随机抽样)",
             "Rosenblueth 点估计法 (PEM, 快速核算)"
         ])
+        self.combo_rel_method = QComboBox()
+        self.combo_rel_method.addItems([
+            "蒙特卡洛模拟法 (MCS, 随机抽样)",
+            "Rosenblueth 点估计法 (PEM, 快速核算)"
+        ])
 
-        self.combo_eval_method = QComboBox()
-        self.combo_eval_method.addItems(["Simplified Bishop (推荐)", "Fellenius / Ordinary"])
-
+        # ★ 补回抽样次数控件
         self.spin_n_sim = QSpinBox()
         self.spin_n_sim.setRange(100, 200000)
         self.spin_n_sim.setValue(5000)
         self.spin_n_sim.setSingleStep(1000)
         self.spin_n_sim.setSuffix(" 次")
 
-        f_method.addRow("可靠度算法:", self.combo_rel_method)
-        f_method.addRow("基础条分模型:", self.combo_eval_method)
+        # self.lbl_inherit_model = QLabel("（自动继承滑面寻优面板）")
+        # self.lbl_inherit_model.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        # f_method.addRow("求解模型:", self.lbl_inherit_model)
+        # f_method.addRow("MCS 抽样次数:", self.spin_n_sim)
+
+        self.lbl_inherit_model = QLabel("（自动继承滑面寻优面板）")
+        self.lbl_inherit_model.setStyleSheet("color: #7f8c8d; font-style: italic;")
+        f_method.addRow("求解模型:", self.lbl_inherit_model)
         f_method.addRow("MCS 抽样次数:", self.spin_n_sim)
         grp_method.setLayout(f_method)
         layout.addWidget(grp_method)
@@ -1288,7 +1303,7 @@ class ReliabilityDockWidget(QDockWidget):
         """提取界面控件参数供后端求解器使用"""
         return {
             "method": "MCS" if "蒙特卡洛" in self.combo_rel_method.currentText() else "PEM",
-            "eval_method": "Bishop" if "Bishop" in self.combo_eval_method.currentText() else "Fellenius",
+            # "eval_method": "Bishop" if "Bishop" in self.combo_eval_method.currentText() else "Fellenius",
             "n_samples": self.spin_n_sim.value(),
             "cov_c": self.spin_cov_c.value(),
             "dist_c": self.combo_dist_c.currentText(),
@@ -1320,7 +1335,7 @@ class ReliabilityDockWidget(QDockWidget):
     def to_dict(self) -> Dict[str, Any]:
         return {
             "rel_method": self.combo_rel_method.currentIndex(),
-            "eval_method": self.combo_eval_method.currentIndex(),
+            # "eval_method": self.combo_eval_method.currentIndex(),
             "n_samples": self.spin_n_sim.value(),
             "cov_c": self.spin_cov_c.value(),
             "dist_c": self.combo_dist_c.currentIndex(),
@@ -1334,7 +1349,7 @@ class ReliabilityDockWidget(QDockWidget):
         if not isinstance(data, dict):
             return
         if "rel_method" in data:   self.combo_rel_method.setCurrentIndex(int(data["rel_method"]))
-        if "eval_method" in data:  self.combo_eval_method.setCurrentIndex(int(data["eval_method"]))
+        # if "eval_method" in data:  self.combo_eval_method.setCurrentIndex(int(data["eval_method"]))
         if "n_samples" in data:    self.spin_n_sim.setValue(int(data["n_samples"]))
         if "cov_c" in data:        self.spin_cov_c.setValue(float(data["cov_c"]))
         if "dist_c" in data:       self.combo_dist_c.setCurrentIndex(int(data["dist_c"]))

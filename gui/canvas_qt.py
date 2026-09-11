@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import (
     QGraphicsPathItem, QGraphicsLineItem
 )
 from PyQt5.QtGui import QPen, QBrush, QColor, QPainter, QPolygonF, QPainterPath
-from PyQt5.QtCore import Qt, QPointF, QRectF
+from PyQt5.QtCore import Qt, QPointF, QRectF, QLineF
 
 
 class SliceGraphicsItem(QGraphicsPolygonItem):
@@ -243,31 +243,78 @@ class SlopeGraphicsView(QGraphicsView):
                     self.scene.addItem(load_line)
 
         # 6. 绘制滑面几何轮廓 (智能区分圆弧与折线)
+        SLIP_COLOR = QColor(192, 57, 43)
+
         if slip_surface is not None and getattr(slip_surface, "surface_type", "") == "polygonal":
-            # 绘制非圆弧多段折线滑面
+            # ---------- 非圆弧: 画折线 ----------
             poly_path = QPainterPath()
             poly_path.moveTo(slip_surface.px[0], slip_surface.py[0])
             for px, py in zip(slip_surface.px[1:], slip_surface.py[1:]):
                 poly_path.lineTo(px, py)
             poly_item = QGraphicsPathItem(poly_path)
-            poly_pen = QPen(QColor(192, 57, 43), 2.2, Qt.DashLine)
+            poly_pen = QPen(SLIP_COLOR, 2.2, Qt.DashLine)
             poly_pen.setCosmetic(True)
             poly_item.setPen(poly_pen)
             self.scene.addItem(poly_item)
-        else:
-            # 绘制圆弧参考虚线与圆心十字标
-            circle_path = QPainterPath()
-            circle_path.addEllipse(QPointF(xc, yc), R, R)
-            ref_circle = QGraphicsPathItem(circle_path)
-            ref_pen = QPen(QColor(189, 195, 199), 1.0, Qt.DotLine)
-            ref_pen.setCosmetic(True)
-            ref_circle.setPen(ref_pen)
-            self.scene.addItem(ref_circle)
 
-            cs = 1.2
+        else:
+            # ---------- 圆弧: 只画扇形 (两条半径 + 弧段) ----------
+            if R is not None and R > 0:
+                # 求滑弧与地表的两个交点: (x_start, y_start), (x_end, y_end)
+                gx_arr = np.array(ground_x, dtype=float)
+                gy_arr = np.array(ground_y, dtype=float)
+
+                # 用解析方法求交点: 圆 y = yc - sqrt(R² - (x-xc)²) 与地表线
+                xs_samp = np.linspace(xc - R + 1e-4, xc + R - 1e-4, 1500)
+                ys_circ = yc - np.sqrt(np.maximum(0.0, R**2 - (xs_samp - xc)**2))
+                ys_grnd = np.interp(xs_samp, gx_arr, gy_arr)
+                inside = np.where(ys_circ - ys_grnd < 0)[0]
+
+                if len(inside) >= 2:
+                    x_s = float(xs_samp[inside[0]])
+                    x_e = float(xs_samp[inside[-1]])
+                else:
+                    # 退化情况: 用整个可见范围
+                    x_s = float(xc - R)
+                    x_e = float(xc + R)
+
+                # 采样弧段
+                n_arc = 200
+                arc_xs = np.linspace(x_s, x_e, n_arc)
+                arc_ys = yc - np.sqrt(np.maximum(0.0, R**2 - (arc_xs - xc)**2))
+
+                # --- 弧段 ---
+                arc_path = QPainterPath()
+                arc_path.moveTo(arc_xs[0], arc_ys[0])
+                for ax, ay in zip(arc_xs[1:], arc_ys[1:]):
+                    arc_path.lineTo(ax, ay)
+                arc_item = QGraphicsPathItem(arc_path)
+                arc_pen = QPen(SLIP_COLOR, 2.2, Qt.DashLine)
+                arc_pen.setCosmetic(True)
+                arc_item.setPen(arc_pen)
+                self.scene.addItem(arc_item)
+
+                # --- 两条半径 ---
+                r_pen = QPen(SLIP_COLOR, 1.6, Qt.DashLine)
+                r_pen.setCosmetic(True)
+
+                line_l = QGraphicsLineItem(
+                    QLineF(xc, yc, float(arc_xs[0]), float(arc_ys[0]))
+                )
+                line_l.setPen(r_pen)
+                self.scene.addItem(line_l)
+
+                line_r = QGraphicsLineItem(
+                    QLineF(xc, yc, float(arc_xs[-1]), float(arc_ys[-1]))
+                )
+                line_r.setPen(r_pen)
+                self.scene.addItem(line_r)
+
+            # --- 圆心十字 (不变) ---
+            cs = max(1.0, (R * 0.03) if R else 1.5)
             c_h = QGraphicsLineItem(xc - cs, yc, xc + cs, yc)
             c_v = QGraphicsLineItem(xc, yc - cs, xc, yc + cs)
-            c_pen = QPen(QColor(192, 57, 43), 2.0)
+            c_pen = QPen(SLIP_COLOR, 2.0)
             c_pen.setCosmetic(True)
             c_h.setPen(c_pen); c_v.setPen(c_pen)
             self.scene.addItem(c_h); self.scene.addItem(c_v)
@@ -291,4 +338,21 @@ class SlopeGraphicsView(QGraphicsView):
                 slice_item = SliceGraphicsItem(s, slice_poly)
                 self.scene.addItem(slice_item)
 
-        self.scene.setSceneRect(min_x, min_y, (max_x - min_x) * 1.05, (max_y - min_y) * 1.05)
+                # 计算场景范围时, 把圆弧也纳入
+        scene_min_x = min_x
+        scene_max_x = max_x
+        scene_min_y = min_y
+        scene_max_y = max_y
+
+        if slip_surface is None or getattr(slip_surface, "surface_type", "") != "polygonal":
+            if R is not None and R > 0:
+                scene_min_x = min(scene_min_x, xc - R - 2.0)
+                scene_max_x = max(scene_max_x, xc + R + 2.0)
+                scene_min_y = min(scene_min_y, yc - R - 2.0)
+                scene_max_y = max(scene_max_y, yc + R + 2.0)
+
+        self.scene.setSceneRect(
+            scene_min_x, scene_min_y,
+            (scene_max_x - scene_min_x) * 1.05,
+            (scene_max_y - scene_min_y) * 1.05,
+        )
